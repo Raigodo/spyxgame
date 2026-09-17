@@ -1,41 +1,40 @@
-export type SignalType = "offer" | "answer" | "candidate";
+export type RoomId = string;
+export type PeerId = string;
+export type MessageId = string;
 
-export interface SignalPayload {
-  offer?: RTCSessionDescriptionInit;
-  answer?: RTCSessionDescriptionInit;
-  candidate?: RTCIceCandidateInit;
+export interface Participant {
+  peerId: PeerId;
+  joinedAt: Date;
 }
 
-export interface IncomingSignal {
-  from: string;
-  type: SignalType;
-  payload: SignalPayload;
+export interface SignalingMessage<T = unknown> {
+  id: MessageId;
+  fromPeerId: PeerId;
+  toPeerId: PeerId;
+  timestamp: Date;
+  payload: T;
 }
 
-export interface JoinRoomResult {
-  roomId: string;
-  peerId: string;
-  /** Peers already present in the room when we joined — send offers to these. */
-  existingParticipants: string[];
+export interface SendMessageInput<T = unknown> {
+  fromPeerId: PeerId;
+  toPeerId: PeerId;
+  payload: T;
 }
 
-/**
- * A participant presence-doc change, as reported by Firestore's snapshot
- * listener. `lastSeenMs` is included on every change type (except it's
- * naturally absent/irrelevant for "removed") so staleness can be tracked
- * without a second read.
- */
-export interface ParticipantChange {
-  peerId: string;
-  type: "added" | "removed" | "modified";
-  lastSeenMs: number | null;
+export interface MessageHandler<T = unknown> {
+  handle(message: SignalingMessage<T>): Promise<void>;
 }
 
-/** A signal document as stored in Firestore, including its doc id. */
-export interface StoredSignal {
-  id: string;
-  from: string;
-  to: string;
-  type: SignalType;
-  payload: SignalPayload;
-}
+export type WebRtcSignal =
+  | {
+      type: "offer";
+      sdp: string;
+    }
+  | {
+      type: "answer";
+      sdp: string;
+    }
+  | {
+      type: "ice-candidate";
+      candidate: RTCIceCandidateInit;
+    };

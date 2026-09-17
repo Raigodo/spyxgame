@@ -1,4 +1,3 @@
-import { FirestoreSignalingService } from "./firestore-signaling-service";
-import { type IncomingSignal } from "./types";
+import { FirestoreSignalingServiceRoot } from "./firestore-signaling-service-root";
 
-export { FirestoreSignalingService as SignalingService, IncomingSignal };
+export { FirestoreSignalingServiceRoot as SignalingServiceRoot };

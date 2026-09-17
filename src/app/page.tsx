@@ -1,7 +1,5 @@
-"use client";
-
-import SignalingTestPage from "@/presentation/temp/SignalingTest";
+import { SignalingServiceRootTest } from "@/presentation/temp/SignalingRootTest";
 
 export default function Home() {
-  return <SignalingTestPage />;
+  return <SignalingServiceRootTest />;
 }
