@@ -12,6 +12,10 @@ export class WebRtcService {
   private readonly signalingService: FirestoreSignalingServiceRoot;
   private readonly factory: RtcConnectionFactory;
   private readonly messageRouter: RtcMessageRouter;
+  private readonly pendingSignals = new Map<
+    SignalingPeerId,
+    Array<{ type: string; sdp?: string; candidate?: RTCIceCandidateInit }>
+  >();
 
   // signalingPeerId → RtcPeerConnection
   private readonly peerConnections = new Map<
@@ -91,7 +95,7 @@ export class WebRtcService {
       conn.dispose();
     }
     this.peerConnections.clear();
-
+    this.pendingSignals.clear(); // add after peerConnections.clear()
     this.messageRouter.dispose();
 
     await this.signalingService.leaveRoom();
@@ -179,6 +183,7 @@ export class WebRtcService {
   }
 
   private handleSignalingPeerLeft(signalingPeerId: SignalingPeerId): void {
+    this.pendingSignals.delete(signalingPeerId); // add this line
     const conn = this.peerConnections.get(signalingPeerId);
     if (!conn) {
       return;
@@ -208,24 +213,34 @@ export class WebRtcService {
       `[WebRtcService] Signal received from signalingPeer=${signalingPeerId} type=${webRtcSignal.type}`,
     );
 
+    // For ICE candidates: if connection exists but remote description isn't set yet,
+    // RtcPeerConnection handles the queue internally.
+    // For offers/answers: if no connection exists yet, queue the signal.
     const conn = this.peerConnections.get(signalingPeerId);
+
+    if (!conn && webRtcSignal.type === "ice-candidate") {
+      console.log(
+        `[WebRtcService] Queuing ICE candidate for unknown peer=${signalingPeerId}`,
+      );
+      this.enqueueSignal(signalingPeerId, webRtcSignal);
+      return;
+    }
 
     switch (webRtcSignal.type) {
       case "offer": {
         if (!webRtcSignal.sdp) {
-          console.error("[WebRtcService] Offer missing SDP");
+          console.warn("[WebRtcService] Offer missing SDP");
           return;
         }
 
-        // Guest: if no connection yet, create one.
+        // Guest receives offer — peer may not be in tracker yet, that's fine.
+        // We create the connection here; tracker will catch up via reconcilePeers.
         const guestConn =
           conn ??
           (() => {
             const newConn = this.createPeerConnection(signalingPeerId);
             this.peerConnections.set(signalingPeerId, newConn);
-            for (const handler of this.peerJoinedHandlers) {
-              handler(this.toRtcPeerInfo(newConn));
-            }
+            // Don't fire peerJoined here — reconcilePeers will do it when tracker catches up.
             return newConn;
           })();
 
@@ -238,25 +253,30 @@ export class WebRtcService {
           answer.sdp!,
           "do-nothing",
         );
+
+        // Drain any signals that arrived before the offer.
+        await this.drainPendingSignals(signalingPeerId);
         break;
       }
 
       case "answer": {
         if (!conn || !webRtcSignal.sdp) {
-          console.error(
+          console.warn(
             `[WebRtcService] Unexpected answer from signalingPeer=${signalingPeerId}`,
           );
           return;
         }
         await conn.receiveAnswer({ type: "answer", sdp: webRtcSignal.sdp });
+        await this.drainPendingSignals(signalingPeerId);
         break;
       }
 
       case "ice-candidate": {
         if (!conn || !webRtcSignal.candidate) {
           console.warn(
-            `[WebRtcService] ICE candidate for unknown peer=${signalingPeerId}, discarding`,
+            `[WebRtcService] ICE candidate for unknown peer=${signalingPeerId}, queuing`,
           );
+          this.enqueueSignal(signalingPeerId, webRtcSignal);
           return;
         }
         await conn.addIceCandidate(webRtcSignal.candidate);
@@ -267,6 +287,35 @@ export class WebRtcService {
         console.warn(
           `[WebRtcService] Unknown signal type: ${webRtcSignal.type}`,
         );
+    }
+  }
+
+  private enqueueSignal(
+    signalingPeerId: SignalingPeerId,
+    signal: { type: string; sdp?: string; candidate?: RTCIceCandidateInit },
+  ): void {
+    if (!this.pendingSignals.has(signalingPeerId)) {
+      this.pendingSignals.set(signalingPeerId, []);
+    }
+    this.pendingSignals.get(signalingPeerId)!.push(signal);
+  }
+
+  private async drainPendingSignals(
+    signalingPeerId: SignalingPeerId,
+  ): Promise<void> {
+    const queued = this.pendingSignals.get(signalingPeerId);
+    if (!queued || queued.length === 0) {
+      return;
+    }
+
+    console.log(
+      `[WebRtcService] Draining ${queued.length} pending signals for signalingPeer=${signalingPeerId}`,
+    );
+
+    this.pendingSignals.delete(signalingPeerId);
+
+    for (const signal of queued) {
+      await this.handleSignalReceived(signalingPeerId, signal);
     }
   }
 

@@ -152,6 +152,7 @@ export class FirestoreSignalingServiceRoot {
       peerId,
       { type: "answer", sdp },
       onIgnoredStrategy,
+      true, // peer may not be in tracker yet when we reply to an offer
     );
   }
 
@@ -164,6 +165,7 @@ export class FirestoreSignalingServiceRoot {
       peerId,
       { type: "ice-candidate", candidate },
       onIgnoredStrategy,
+      true, // same reason — ICE flows before tracker catches up
     );
   }
 
@@ -173,6 +175,7 @@ export class FirestoreSignalingServiceRoot {
     peerId: SignalingPeerId,
     signal: WebRtcSignal,
     onIgnoredStrategy: "remove" | "do-nothing",
+    skipTrackerCheck = false,
   ): Promise<void> {
     if (!this.localPeerId) {
       throw new Error("Cannot send a signal before joining a room.");
@@ -180,8 +183,7 @@ export class FirestoreSignalingServiceRoot {
     if (peerId === this.localPeerId) {
       throw new Error("Cannot send a signal to yourself.");
     }
-    // Fail immediately — no sketchy "maybe it'll show up soon" logic.
-    if (!this.tracker.has(peerId)) {
+    if (!skipTrackerCheck && !this.tracker.has(peerId)) {
       throw new Error(`Peer "${peerId}" is not in the room.`);
     }
     if (!this.localMessageService) {

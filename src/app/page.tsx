@@ -1,3 +1,4 @@
+import { RtcManualTest } from "@/presentation/temp/RtcManualTest";
 import { SignalingServiceRootTest } from "@/presentation/temp/SignalingRootTest";
 import { WebRtcTest } from "@/presentation/temp/WebRtcTest";
 

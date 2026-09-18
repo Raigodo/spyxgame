@@ -213,7 +213,7 @@ export class FirestoreGateway {
         onSignalingPeers(peers);
       },
       (error) => {
-        console.error("Failed to subscribe to signaling peers:", error);
+        console.warn("Failed to subscribe to signaling peers:", error);
       },
     );
   }

@@ -22,6 +22,9 @@ export class RtcPeerConnection {
   private _rtcPeerId: RtcPeerId;
   private _status: RtcPeerStatus = "connecting";
 
+  private remoteDescriptionSet = false;
+  private pendingIceCandidates: RTCIceCandidateInit[] = [];
+
   constructor(
     signalingPeerId: SignalingPeerId,
     private readonly factory: RtcConnectionFactory,
@@ -58,18 +61,41 @@ export class RtcPeerConnection {
       `[RtcPeerConnection][${this.signalingPeerId}] Receiving offer, rtcPeerId=${this._rtcPeerId}`,
     );
     const native = this.createNativeConnection();
-    return native.receiveOfferAsGuest(offer);
+    const answer = await native.receiveOfferAsGuest(offer);
+    await this.drainIceCandidates();
+    return answer;
   }
 
   async receiveAnswer(answer: RTCSessionDescriptionInit): Promise<void> {
     console.log(
       `[RtcPeerConnection][${this.signalingPeerId}] Receiving answer`,
     );
-    this.assertNativeConnection().receiveAnswer(answer);
+    await this.assertNativeConnection().receiveAnswer(answer);
+    await this.drainIceCandidates();
   }
 
   async addIceCandidate(candidate: RTCIceCandidateInit): Promise<void> {
+    if (!this.remoteDescriptionSet) {
+      console.log(
+        `[RtcPeerConnection][${this.signalingPeerId}] Queuing ICE candidate (remote description not set yet)`,
+      );
+      this.pendingIceCandidates.push(candidate);
+      return;
+    }
     await this.assertNativeConnection().addIceCandidate(candidate);
+  }
+
+  private async drainIceCandidates(): Promise<void> {
+    this.remoteDescriptionSet = true;
+    const queued = this.pendingIceCandidates.splice(0);
+    if (queued.length > 0) {
+      console.log(
+        `[RtcPeerConnection][${this.signalingPeerId}] Draining ${queued.length} queued ICE candidates`,
+      );
+    }
+    for (const candidate of queued) {
+      await this.assertNativeConnection().addIceCandidate(candidate);
+    }
   }
 
   // ─── Messaging ───────────────────────────────────────────────────────────
@@ -86,6 +112,8 @@ export class RtcPeerConnection {
     );
     this.disposeNativeConnection();
     this._rtcPeerId = crypto.randomUUID();
+    this.remoteDescriptionSet = false;
+    this.pendingIceCandidates = [];
     this.setStatus("reconnecting");
     return this.initAsHost();
   }
@@ -98,6 +126,8 @@ export class RtcPeerConnection {
     );
     this.disposeNativeConnection();
     this._rtcPeerId = crypto.randomUUID();
+    this.remoteDescriptionSet = false;
+    this.pendingIceCandidates = [];
     this.setStatus("reconnecting");
     return this.receiveOffer(offer);
   }
@@ -149,6 +179,9 @@ export class RtcPeerConnection {
   }
 
   private disposeNativeConnection(): void {
+    this.remoteDescriptionSet = false;
+    this.pendingIceCandidates = [];
+
     this.unsubscribeFromIce?.();
     this.unsubscribeFromIce = undefined;
 

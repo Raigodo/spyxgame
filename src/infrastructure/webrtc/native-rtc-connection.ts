@@ -168,7 +168,7 @@ export class NativeRtcConnection {
     };
 
     channel.onerror = (event) => {
-      console.error(
+      console.warn(
         `[NativeRtcConnection][${this.label}] Data channel error`,
         event,
       );

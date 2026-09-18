@@ -66,7 +66,7 @@ export class FirestoreSignalingMessageService {
 
       await this.gateway.deleteMessage(this.roomId, peerId, message.id);
     } catch (error) {
-      console.error(
+      console.warn(
         `Failed to handle signaling message "${message.id}".`,
         error,
       );
