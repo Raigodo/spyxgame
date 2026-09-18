@@ -2,59 +2,52 @@ import { Countdown } from "./countdown";
 import { firestoreClient } from "./firestore-client";
 import { FirestoreGateway } from "./firestore-gateway";
 import { FirestoreSignalingMessageService } from "./firestore-signaling-message-service";
+import { SignalingPeerTracker } from "./signaling-peer-tracker";
 
 import type {
-  Participant,
-  PeerId,
+  SignalingPeer,
+  SignalingPeerId,
   RoomId,
   SignalingMessage,
   WebRtcSignal,
 } from "./types";
 
-interface ParticipantState {
-  participant: Participant;
-  messageTimeout?: Countdown;
-}
-
-type ParticipantJoinedHandler = (participant: Participant) => void;
-
-type ParticipantLeftHandler = (participant: Participant) => void;
-
 type SignalReceivedHandler = (message: SignalingMessage<WebRtcSignal>) => void;
 
 export class FirestoreSignalingServiceRoot {
   private readonly gateway: FirestoreGateway;
+  private readonly tracker = new SignalingPeerTracker();
 
-  private readonly participants = new Map<PeerId, ParticipantState>();
-
-  private readonly participantJoinedHandlers =
-    new Set<ParticipantJoinedHandler>();
-
-  private readonly participantLeftHandlers = new Set<ParticipantLeftHandler>();
+  // Countdowns are keyed by peerId, separate from tracker state.
+  // A countdown tracks whether a sent message was ever acknowledged.
+  private readonly pendingMessageTimeouts = new Map<
+    SignalingPeerId,
+    Countdown
+  >();
 
   private readonly signalReceivedHandlers = new Set<SignalReceivedHandler>();
 
   private localMessageService?: FirestoreSignalingMessageService;
-
-  private unsubscribeFromParticipants?: () => void;
+  private unsubscribeFromSignalingPeers?: () => void;
 
   private roomId?: RoomId;
-  private localPeerId?: PeerId;
+  private localPeerId?: SignalingPeerId;
 
   public constructor() {
     this.gateway = new FirestoreGateway(firestoreClient);
   }
 
+  // ─── Public API ───────────────────────────────────────────────────────────
+
   public async joinRoom(
     roomId: RoomId,
-    peerId: PeerId = crypto.randomUUID(),
-  ): Promise<PeerId> {
+    peerId: SignalingPeerId = crypto.randomUUID(),
+  ): Promise<SignalingPeerId> {
     if (this.localPeerId) {
       throw new Error("Already joined a room.");
     }
 
     const roomExists = await this.gateway.roomExists(roomId);
-
     if (!roomExists) {
       await this.gateway.createRoom(roomId);
     }
@@ -62,7 +55,7 @@ export class FirestoreSignalingServiceRoot {
     this.roomId = roomId;
     this.localPeerId = peerId;
 
-    await this.gateway.addParticipant(roomId, peerId, {
+    await this.gateway.addSignalingPeer(roomId, peerId, {
       joinedAt: new Date(),
     });
 
@@ -72,11 +65,11 @@ export class FirestoreSignalingServiceRoot {
       this.localPeerId,
     );
 
-    this.localMessageService.startHandlingMessagesForParticipant(
+    this.localMessageService.startHandlingMessagesForSignalingPeer(
       peerId,
       {
-        async handle(message) {
-          // The root service does not interpret the message.
+        async handle() {
+          // Root service does not interpret signals — WebRTC service does.
         },
       },
       (message) => {
@@ -84,7 +77,7 @@ export class FirestoreSignalingServiceRoot {
       },
     );
 
-    this.startTrackingParticipants();
+    this.startTrackingSignalingPeers();
 
     return peerId;
   }
@@ -97,116 +90,102 @@ export class FirestoreSignalingServiceRoot {
     const roomId = this.roomId;
     const localPeerId = this.localPeerId;
 
-    this.stopTrackingParticipants();
+    this.stopTrackingSignalingPeers();
 
     this.localMessageService?.stopHandlingMessages();
     this.localMessageService = undefined;
 
-    this.participants.clear();
+    // Stop all pending timeouts before clearing tracker —
+    // tracker.clear() will fire onPeerRemoved for each peer.
+    for (const countdown of this.pendingMessageTimeouts.values()) {
+      countdown.stop();
+    }
+    this.pendingMessageTimeouts.clear();
 
-    await this.gateway.removeParticipant(roomId, localPeerId);
+    this.tracker.clear();
+
+    await this.gateway.removeSignalingPeer(roomId, localPeerId);
 
     this.roomId = undefined;
     this.localPeerId = undefined;
   }
 
-  public getParticipants(): Participant[] {
-    return Array.from(this.participants.values(), (state) => state.participant);
+  public getSignalingPeers(): SignalingPeer[] {
+    return this.tracker.getAll();
   }
 
-  public onParticipantJoined(handler: ParticipantJoinedHandler): () => void {
-    this.participantJoinedHandlers.add(handler);
-
-    return () => {
-      this.participantJoinedHandlers.delete(handler);
-    };
+  public onSignalingPeerJoined(
+    handler: (peer: SignalingPeer) => void,
+  ): () => void {
+    return this.tracker.onPeerAdded(handler);
   }
 
-  public onParticipantLeft(handler: ParticipantLeftHandler): () => void {
-    this.participantLeftHandlers.add(handler);
-
-    return () => {
-      this.participantLeftHandlers.delete(handler);
-    };
+  public onSignalingPeerLeft(
+    handler: (peer: SignalingPeer) => void,
+  ): () => void {
+    return this.tracker.onPeerRemoved(handler);
   }
 
   public onSignalReceived(handler: SignalReceivedHandler): () => void {
-    this.signalReceivedHandlers.add((x) => {
-      const state = this.participants.get(x.fromPeerId);
-      state?.messageTimeout?.stop();
-      return handler(x);
-    });
-
-    return () => {
-      this.signalReceivedHandlers.delete(handler);
-    };
+    this.signalReceivedHandlers.add(handler);
+    return () => this.signalReceivedHandlers.delete(handler);
   }
 
   public async sendOfferToPeer(
-    peerId: PeerId,
+    peerId: SignalingPeerId,
     sdp: string,
-    onIgnoredStrategy: "remove" | "do-nothing" = "do-nothing",
+    onIgnoredStrategy: "remove" | "do-nothing",
   ): Promise<void> {
     await this.sendSignalToPeer(
       peerId,
-      {
-        type: "offer",
-        sdp,
-      },
+      { type: "offer", sdp },
       onIgnoredStrategy,
     );
   }
 
   public async sendAnswerToPeer(
-    peerId: PeerId,
+    peerId: SignalingPeerId,
     sdp: string,
-    onIgnoredStrategy: "remove" | "do-nothing" = "do-nothing",
+    onIgnoredStrategy: "remove" | "do-nothing",
   ): Promise<void> {
     await this.sendSignalToPeer(
       peerId,
-      {
-        type: "answer",
-        sdp,
-      },
+      { type: "answer", sdp },
       onIgnoredStrategy,
     );
   }
 
   public async sendIceCandidateToPeer(
-    peerId: PeerId,
+    peerId: SignalingPeerId,
     candidate: RTCIceCandidateInit,
-    onIgnoredStrategy: "remove" | "do-nothing" = "do-nothing",
+    onIgnoredStrategy: "remove" | "do-nothing",
   ): Promise<void> {
     await this.sendSignalToPeer(
       peerId,
-      {
-        type: "ice-candidate",
-        candidate,
-      },
+      { type: "ice-candidate", candidate },
       onIgnoredStrategy,
     );
   }
 
+  // ─── Private ──────────────────────────────────────────────────────────────
+
   private async sendSignalToPeer(
-    peerId: PeerId,
+    peerId: SignalingPeerId,
     signal: WebRtcSignal,
-    onIgnoredStrategy: "remove" | "do-nothing" = "do-nothing",
+    onIgnoredStrategy: "remove" | "do-nothing",
   ): Promise<void> {
     if (!this.localPeerId) {
       throw new Error("Cannot send a signal before joining a room.");
     }
-
     if (peerId === this.localPeerId) {
       throw new Error("Cannot send a signal to yourself.");
     }
-
-    const state = this.participants.get(peerId);
-    if (!state) {
-      throw new Error(`Participant "${peerId}" is not in the room.`);
+    // Fail immediately — no sketchy "maybe it'll show up soon" logic.
+    if (!this.tracker.has(peerId)) {
+      throw new Error(`Peer "${peerId}" is not in the room.`);
     }
-
     if (!this.localMessageService) {
-      throw new Error("Signaling message service is not initialized.");
+      throw new Error("Message service is not initialized.");
     }
 
     const message = await this.localMessageService.sendMessage({
@@ -214,79 +193,86 @@ export class FirestoreSignalingServiceRoot {
       payload: signal,
     });
 
-    state.messageTimeout ??= new Countdown(
-      () =>
-        this.roomId &&
-        onIgnoredStrategy &&
-        this.gateway.removeParticipant(this.roomId, peerId),
-    );
+    // One countdown per peer — reset it if a new message is sent before
+    // the previous one was acknowledged. This avoids stacking timeouts.
+    let countdown = this.pendingMessageTimeouts.get(peerId);
 
-    state.messageTimeout.start(15_000);
+    if (!countdown) {
+      countdown = new Countdown(async () => {
+        this.pendingMessageTimeouts.delete(peerId);
+
+        if (onIgnoredStrategy === "remove" && this.roomId) {
+          const stillPending = await this.gateway.messageExists(
+            this.roomId,
+            peerId,
+            message.id,
+          );
+          if (stillPending) {
+            await this.gateway.removeSignalingPeer(this.roomId, peerId);
+          }
+        }
+      });
+      this.pendingMessageTimeouts.set(peerId, countdown);
+    }
+
+    countdown.start(15_000);
   }
 
-  private startTrackingParticipants(): void {
+  private startTrackingSignalingPeers(): void {
     if (!this.roomId) {
       return;
     }
 
-    this.unsubscribeFromParticipants = this.gateway.subscribeToParticipants(
+    this.unsubscribeFromSignalingPeers = this.gateway.subscribeToSignalingPeers(
       this.roomId,
-      (participants) => {
-        this.updateParticipants(participants);
-      },
+      (peers) => this.reconcilePeers(peers),
     );
   }
 
-  private stopTrackingParticipants(): void {
-    this.unsubscribeFromParticipants?.();
-    this.unsubscribeFromParticipants = undefined;
+  private stopTrackingSignalingPeers(): void {
+    this.unsubscribeFromSignalingPeers?.();
+    this.unsubscribeFromSignalingPeers = undefined;
   }
 
-  private updateParticipants(participants: Participant[]): void {
-    const nextParticipantIds = new Set(
-      participants.map((participant) => participant.peerId),
-    );
+  // The single chokepoint for all peer state changes.
+  // Order is guaranteed: state is always updated before events fire.
+  private reconcilePeers(peers: SignalingPeer[]): void {
+    const incomingIds = new Set(peers.map((p) => p.peerId));
 
-    for (const participant of participants) {
-      if (participant.peerId === this.localPeerId) {
+    // Add new peers or update existing ones.
+    for (const peer of peers) {
+      if (peer.peerId === this.localPeerId) {
         continue;
       }
 
-      if (this.participants.has(participant.peerId)) {
-        const state = this.participants.get(participant.peerId)!;
-
-        state.participant = participant;
-
-        continue;
+      if (this.tracker.has(peer.peerId)) {
+        this.tracker.update(peer);
+      } else {
+        // tracker.add fires onPeerAdded after the peer is in state.
+        // Any handler (e.g. WebRTC service) that calls tracker.get()
+        // inside onPeerAdded will always succeed.
+        this.tracker.add(peer);
       }
-
-      this.addParticipant(participant);
     }
 
-    for (const [peerId, state] of this.participants) {
-      if (nextParticipantIds.has(peerId)) {
-        continue;
+    // Remove peers that are no longer present.
+    for (const existing of this.tracker.getAll()) {
+      if (!incomingIds.has(existing.peerId)) {
+        // Stop their timeout before removing.
+        this.pendingMessageTimeouts.get(existing.peerId)?.stop();
+        this.pendingMessageTimeouts.delete(existing.peerId);
+
+        // tracker.remove fires onPeerRemoved after the peer is out of state.
+        this.tracker.remove(existing.peerId);
       }
-
-      this.participants.delete(peerId);
-
-      for (const handler of this.participantLeftHandlers) {
-        handler(state.participant);
-      }
-    }
-  }
-
-  private addParticipant(participant: Participant): void {
-    this.participants.set(participant.peerId, {
-      participant,
-    });
-
-    for (const handler of this.participantJoinedHandlers) {
-      handler(participant);
     }
   }
 
   private handleSignalReceived(message: SignalingMessage<WebRtcSignal>): void {
+    // Stop the timeout — the remote peer acknowledged our signal.
+    this.pendingMessageTimeouts.get(message.fromPeerId)?.stop();
+    this.pendingMessageTimeouts.delete(message.fromPeerId);
+
     for (const handler of this.signalReceivedHandlers) {
       handler(message);
     }

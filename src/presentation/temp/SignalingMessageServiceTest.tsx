@@ -7,7 +7,7 @@ import { FirestoreGateway } from "@/infrastructure/signaling/firestore-gateway";
 import { FirestoreSignalingMessageService } from "@/infrastructure/signaling/firestore-signaling-message-service";
 
 import type {
-  Participant,
+  SignalingPeer,
   SignalingMessage,
 } from "@/infrastructure/signaling/types";
 
@@ -17,7 +17,7 @@ export function SignalingMessageServiceTest() {
   const [roomId, setRoomId] = useState("test-room");
   const [peerId, setPeerId] = useState("");
 
-  const [participants, setParticipants] = useState<Participant[]>([]);
+  const [signalingPeers, setSignalingPeers] = useState<SignalingPeer[]>([]);
 
   const [targetPeerId, setTargetPeerId] = useState("");
 
@@ -60,7 +60,7 @@ export function SignalingMessageServiceTest() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setService(messageService);
 
-    messageService.startHandlingMessagesForParticipant(
+    messageService.startHandlingMessagesForSignalingPeer(
       peerId,
       {
         async handle(message) {
@@ -72,16 +72,16 @@ export function SignalingMessageServiceTest() {
       },
     );
 
-    const unsubscribeParticipants = gateway.subscribeToParticipants(
+    const unsubscribeSignalingPeers = gateway.subscribeToSignalingPeers(
       roomId,
-      (nextParticipants) => {
-        setParticipants(nextParticipants);
+      (nextSignalingPeers) => {
+        setSignalingPeers(nextSignalingPeers);
       },
     );
 
     return () => {
       messageService.stopHandlingMessages();
-      unsubscribeParticipants();
+      unsubscribeSignalingPeers();
     };
   }, [joined, peerId, roomId]);
 
@@ -99,7 +99,7 @@ export function SignalingMessageServiceTest() {
         await gateway.createRoom(roomId);
       }
 
-      await gateway.addParticipant(roomId, peerId, {
+      await gateway.addSignalingPeer(roomId, peerId, {
         joinedAt: new Date(),
       });
 
@@ -115,7 +115,7 @@ export function SignalingMessageServiceTest() {
     try {
       service?.stopHandlingMessages();
 
-      await gateway.removeParticipant(roomId, peerId);
+      await gateway.removeSignalingPeer(roomId, peerId);
 
       setJoined(false);
       setService(null);
@@ -134,7 +134,7 @@ export function SignalingMessageServiceTest() {
       }
 
       if (!targetPeerId) {
-        throw new Error("Select a participant.");
+        throw new Error("Select a Signaling peer.");
       }
 
       if (targetPeerId === peerId) {
@@ -158,8 +158,8 @@ export function SignalingMessageServiceTest() {
     }
   }
 
-  const otherParticipants = participants.filter(
-    (participant) => participant.peerId !== peerId,
+  const otherSignalingPeers = signalingPeers.filter(
+    (peer) => peer.peerId !== peerId,
   );
 
   return (
@@ -186,7 +186,7 @@ export function SignalingMessageServiceTest() {
 
           <div>
             <div className="text-muted-foreground text-xs">
-              Your participant ID
+              Your signaling peer ID
             </div>
 
             <code className="text-sm break-all">{peerId}</code>
@@ -215,28 +215,24 @@ export function SignalingMessageServiceTest() {
       {joined && (
         <>
           <section className="p-4 border rounded">
-            <h2 className="mb-3 font-semibold">Participants</h2>
+            <h2 className="mb-3 font-semibold">Signaling peers</h2>
 
-            {otherParticipants.length === 0 ? (
+            {otherSignalingPeers.length === 0 ? (
               <p className="text-muted-foreground text-sm">
-                No other participants.
+                No other signaling peers.
               </p>
             ) : (
               <div className="flex flex-col gap-2">
-                {otherParticipants.map((participant) => (
+                {otherSignalingPeers.map((peer) => (
                   <button
-                    key={participant.peerId}
+                    key={peer.peerId}
                     type="button"
-                    onClick={() => setTargetPeerId(participant.peerId)}
+                    onClick={() => setTargetPeerId(peer.peerId)}
                     className={`rounded border p-3 text-left ${
-                      targetPeerId === participant.peerId
-                        ? "border-primary"
-                        : ""
+                      targetPeerId === peer.peerId ? "border-primary" : ""
                     }`}
                   >
-                    <code className="text-sm break-all">
-                      {participant.peerId}
-                    </code>
+                    <code className="text-sm break-all">{peer.peerId}</code>
                   </button>
                 ))}
               </div>
@@ -249,7 +245,7 @@ export function SignalingMessageServiceTest() {
             <div className="mb-3 text-sm">
               To:{" "}
               <code className="break-all">
-                {targetPeerId || "No participant selected"}
+                {targetPeerId || "No signaling peer selected"}
               </code>
             </div>
 

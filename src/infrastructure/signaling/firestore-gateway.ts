@@ -10,15 +10,14 @@ import {
   serverTimestamp,
   setDoc,
   Timestamp,
-  where,
   type Firestore,
   type Unsubscribe,
 } from "firebase/firestore";
 
 import type {
   MessageId,
-  Participant,
-  PeerId,
+  SignalingPeer,
+  SignalingPeerId,
   RoomId,
   SignalingMessage,
 } from "./types";
@@ -36,31 +35,35 @@ export class FirestoreGateway {
     return doc(this.client, "rooms", roomId);
   }
 
-  private participantsRef(roomId: RoomId) {
-    return collection(this.client, "rooms", roomId, "participants");
+  private signalingPeersRef(roomId: RoomId) {
+    return collection(this.client, "rooms", roomId, "signaling-peers");
   }
 
-  private participantRef(roomId: RoomId, peerId: PeerId) {
-    return doc(this.client, "rooms", roomId, "participants", peerId);
+  private signalingPeerRef(roomId: RoomId, peerId: SignalingPeerId) {
+    return doc(this.client, "rooms", roomId, "signaling-peers", peerId);
   }
 
-  private messagesRef(roomId: RoomId, peerId: PeerId) {
+  private messagesRef(roomId: RoomId, peerId: SignalingPeerId) {
     return collection(
       this.client,
       "rooms",
       roomId,
-      "participants",
+      "signaling-peers",
       peerId,
       "messages",
     );
   }
 
-  private messageRef(roomId: RoomId, peerId: PeerId, messageId: MessageId) {
+  private messageRef(
+    roomId: RoomId,
+    peerId: SignalingPeerId,
+    messageId: MessageId,
+  ) {
     return doc(
       this.client,
       "rooms",
       roomId,
-      "participants",
+      "signaling-peers",
       peerId,
       "messages",
       messageId,
@@ -85,22 +88,25 @@ export class FirestoreGateway {
     return snapshot.exists();
   }
 
-  async addParticipant(
+  async addSignalingPeer(
     roomId: RoomId,
-    peerId: PeerId,
-    participant: Omit<Participant, "peerId">,
+    peerId: SignalingPeerId,
+    peer: Omit<SignalingPeer, "peerId">,
   ): Promise<void> {
-    await setDoc(this.participantRef(roomId, peerId), {
-      joinedAt: participant.joinedAt,
+    await setDoc(this.signalingPeerRef(roomId, peerId), {
+      joinedAt: peer.joinedAt,
     });
   }
 
-  async removeParticipant(roomId: RoomId, peerId: PeerId): Promise<void> {
-    await deleteDoc(this.participantRef(roomId, peerId));
+  async removeSignalingPeer(
+    roomId: RoomId,
+    peerId: SignalingPeerId,
+  ): Promise<void> {
+    await deleteDoc(this.signalingPeerRef(roomId, peerId));
   }
 
-  async getParticipants(roomId: RoomId): Promise<Participant[]> {
-    const snapshot = await getDocs(this.participantsRef(roomId));
+  async getSignalingPeers(roomId: RoomId): Promise<SignalingPeer[]> {
+    const snapshot = await getDocs(this.signalingPeersRef(roomId));
 
     return snapshot.docs.map((document) => {
       const data = document.data();
@@ -112,8 +118,11 @@ export class FirestoreGateway {
     });
   }
 
-  async participantExists(roomId: RoomId, peerId: PeerId): Promise<boolean> {
-    const snapshot = await getDoc(this.participantRef(roomId, peerId));
+  async signalingPeerExists(
+    roomId: RoomId,
+    peerId: SignalingPeerId,
+  ): Promise<boolean> {
+    const snapshot = await getDoc(this.signalingPeerRef(roomId, peerId));
 
     return snapshot.exists();
   }
@@ -128,7 +137,7 @@ export class FirestoreGateway {
 
   subscribeToMessages(
     roomId: RoomId,
-    peerId: PeerId,
+    peerId: SignalingPeerId,
     onMessage: (message: SignalingMessage) => void,
   ): Unsubscribe {
     const messagesQuery = query(
@@ -157,7 +166,7 @@ export class FirestoreGateway {
 
   async deleteMessage(
     roomId: RoomId,
-    peerId: PeerId,
+    peerId: SignalingPeerId,
     messageId: MessageId,
   ): Promise<void> {
     await deleteDoc(this.messageRef(roomId, peerId, messageId));
@@ -165,43 +174,47 @@ export class FirestoreGateway {
 
   public async messageExists(
     roomId: RoomId,
-    participantId: PeerId,
+    peerId: SignalingPeerId,
     messageId: MessageId,
   ): Promise<boolean> {
-    const snapshot = await getDoc(
-      this.messageRef(roomId, participantId, messageId),
-    );
+    const snapshot = await getDoc(this.messageRef(roomId, peerId, messageId));
 
     return snapshot.exists();
   }
 
-  subscribeToParticipants(
+  subscribeToSignalingPeers(
     roomId: RoomId,
-    onParticipants: (participants: Participant[]) => void,
+    onSignalingPeers: (peer: SignalingPeer[]) => void,
   ): Unsubscribe {
-    const participantsRef = collection(
+    const signalingPeersRef = collection(
       this.client,
       "rooms",
       roomId,
-      "participants",
+      "signaling-peers",
     );
 
-    const participantsQuery = query(
-      participantsRef,
+    const signalingPeersQuery = query(
+      signalingPeersRef,
       orderBy("joinedAt", "asc"),
     );
 
-    return onSnapshot(participantsQuery, (snapshot) => {
-      const participants: Participant[] = snapshot.docs.map((doc) => {
-        const data = doc.data();
+    return onSnapshot(
+      signalingPeersQuery,
+      (snapshot) => {
+        const peers: SignalingPeer[] = snapshot.docs.map((doc) => {
+          const data = doc.data();
 
-        return {
-          peerId: doc.id,
-          joinedAt: (data.joinedAt as Timestamp).toDate(),
-        };
-      });
+          return {
+            peerId: doc.id,
+            joinedAt: (data.joinedAt as Timestamp).toDate(),
+          };
+        });
 
-      onParticipants(participants);
-    });
+        onSignalingPeers(peers);
+      },
+      (error) => {
+        console.error("Failed to subscribe to signaling peers:", error);
+      },
+    );
   }
 }

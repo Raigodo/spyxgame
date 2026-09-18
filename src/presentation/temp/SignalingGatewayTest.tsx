@@ -6,7 +6,7 @@ import { firestoreClient } from "@/infrastructure/signaling/firestore-client";
 import { FirestoreGateway } from "@/infrastructure/signaling/firestore-gateway";
 
 import type {
-  Participant,
+  SignalingPeer,
   SignalingMessage,
 } from "@/infrastructure/signaling/types";
 
@@ -18,7 +18,7 @@ export function SignalingGatewayTest() {
 
   const [roomExists, setRoomExists] = useState<boolean | null>(null);
 
-  const [participants, setParticipants] = useState<Participant[]>([]);
+  const [signalingPeers, setSignalingPeers] = useState<SignalingPeer[]>([]);
 
   const [messages, setMessages] = useState<SignalingMessage[]>([]);
 
@@ -66,7 +66,7 @@ export function SignalingGatewayTest() {
   }, []);
 
   /*
-   * Subscribe to participants.
+   * Subscribe to Signaling peers.
    *
    * This subscription is intentionally always active once
    * a room ID exists, so you can open this page in two tabs
@@ -78,21 +78,23 @@ export function SignalingGatewayTest() {
     }
 
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    log(`[SUBSCRIBE] Participants: ${roomId}`);
+    log(`[SUBSCRIBE] Signaling peers: ${roomId}`);
 
-    const unsubscribe = gateway.subscribeToParticipants(
+    const unsubscribe = gateway.subscribeToSignalingPeers(
       roomId,
-      (nextParticipants) => {
-        setParticipants(nextParticipants);
+      (nextSignalingPeers) => {
+        console.log("signaling peeers changed");
 
-        log(`[PARTICIPANTS] ${nextParticipants.length} participant(s)`);
+        setSignalingPeers(nextSignalingPeers);
+
+        log(`[SignalingPeers] ${nextSignalingPeers.length} Signaling peer(s)`);
       },
     );
 
     return () => {
       unsubscribe();
 
-      log(`[UNSUBSCRIBE] Participants: ${roomId}`);
+      log(`[UNSUBSCRIBE] Signaling peers: ${roomId}`);
     };
   }, [roomId]);
 
@@ -142,39 +144,39 @@ export function SignalingGatewayTest() {
     });
   }
 
-  async function handleAddParticipant() {
+  async function handleAddSignalingPeer() {
     await run(async () => {
-      await gateway.addParticipant(roomId, peerId, {
+      await gateway.addSignalingPeer(roomId, peerId, {
         joinedAt: new Date(),
       });
 
-      log(`[PARTICIPANT ADDED] ${peerId}`);
+      log(`[SignalingPeer ADDED] ${peerId}`);
     });
   }
 
-  async function handleRemoveParticipant() {
+  async function handleRemoveSignalingPeer() {
     await run(async () => {
-      await gateway.removeParticipant(roomId, peerId);
+      await gateway.removeSignalingPeer(roomId, peerId);
 
-      log(`[PARTICIPANT REMOVED] ${peerId}`);
+      log(`[SignalingPeer REMOVED] ${peerId}`);
     });
   }
 
-  async function handleGetParticipants() {
+  async function handleGetSignalingPeers() {
     await run(async () => {
-      const result = await gateway.getParticipants(roomId);
+      const result = await gateway.getSignalingPeers(roomId);
 
-      setParticipants(result);
+      setSignalingPeers(result);
 
-      log(`[GET PARTICIPANTS] ${result.length} participant(s)`);
+      log(`[GET SignalingPeers] ${result.length} SignalingPeer(s)`);
     });
   }
 
-  async function handleCheckParticipant() {
+  async function handleCheckSignalingPeer() {
     await run(async () => {
-      const exists = await gateway.participantExists(roomId, peerId);
+      const exists = await gateway.signalingPeerExists(roomId, peerId);
 
-      log(`[PARTICIPANT EXISTS] ${peerId}: ${exists}`);
+      log(`[SignalingPeer EXISTS] ${peerId}: ${exists}`);
     });
   }
 
@@ -273,20 +275,20 @@ export function SignalingGatewayTest() {
         )}
       </section>
 
-      {/* Participants */}
+      {/* SignalingPeers */}
       <section className="p-4 border rounded-lg">
         <div className="flex justify-between items-center mb-3">
-          <h2 className="font-semibold">Participants</h2>
+          <h2 className="font-semibold">Signaling peers</h2>
 
           <span className="text-muted-foreground text-sm">
-            {participants.length}
+            {signalingPeers.length}
           </span>
         </div>
 
         <div className="flex flex-wrap gap-2 mb-4">
           <button
             type="button"
-            onClick={() => void handleAddParticipant()}
+            onClick={() => void handleAddSignalingPeer()}
             className="px-3 py-2 border rounded-md"
           >
             Add Me
@@ -294,7 +296,7 @@ export function SignalingGatewayTest() {
 
           <button
             type="button"
-            onClick={() => void handleRemoveParticipant()}
+            onClick={() => void handleRemoveSignalingPeer()}
             className="px-3 py-2 border rounded-md"
           >
             Remove Me
@@ -302,31 +304,31 @@ export function SignalingGatewayTest() {
 
           <button
             type="button"
-            onClick={() => void handleGetParticipants()}
+            onClick={() => void handleGetSignalingPeers()}
             className="px-3 py-2 border rounded-md"
           >
-            Get Participants
+            Get Signaling peers
           </button>
 
           <button
             type="button"
-            onClick={() => void handleCheckParticipant()}
+            onClick={() => void handleCheckSignalingPeer()}
             className="px-3 py-2 border rounded-md"
           >
             Check Me
           </button>
         </div>
 
-        {participants.length === 0 ? (
-          <p className="text-muted-foreground text-sm">No participants.</p>
+        {signalingPeers.length === 0 ? (
+          <p className="text-muted-foreground text-sm">No Signaling peers.</p>
         ) : (
           <div className="flex flex-col gap-2">
-            {participants.map((participant) => (
-              <div key={participant.peerId} className="bg-muted p-3 rounded-md">
-                <code className="text-sm break-all">{participant.peerId}</code>
+            {signalingPeers.map((peer) => (
+              <div key={peer.peerId} className="bg-muted p-3 rounded-md">
+                <code className="text-sm break-all">{peer.peerId}</code>
 
                 <div className="mt-1 text-muted-foreground text-xs">
-                  Joined: {participant.joinedAt.toLocaleString()}
+                  Joined: {peer.joinedAt.toLocaleString()}
                 </div>
               </div>
             ))}

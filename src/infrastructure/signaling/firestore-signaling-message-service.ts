@@ -1,5 +1,10 @@
 import type { FirestoreGateway } from "./firestore-gateway";
-import type { MessageHandler, PeerId, RoomId, SignalingMessage } from "./types";
+import type {
+  MessageHandler,
+  SignalingPeerId,
+  RoomId,
+  SignalingMessage,
+} from "./types";
 
 export class FirestoreSignalingMessageService {
   private unsubscribeFromMessages?: () => void;
@@ -7,7 +12,7 @@ export class FirestoreSignalingMessageService {
   public constructor(
     private readonly gateway: FirestoreGateway,
     private readonly roomId: RoomId,
-    private readonly currentPeerId: PeerId,
+    private readonly currentPeerId: SignalingPeerId,
   ) {}
 
   public async sendMessage<T>(
@@ -23,8 +28,8 @@ export class FirestoreSignalingMessageService {
     return enhancedMessage;
   }
 
-  public startHandlingMessagesForParticipant<T>(
-    participantId: PeerId,
+  public startHandlingMessagesForSignalingPeer<T>(
+    peerId: SignalingPeerId,
     messageHandler: MessageHandler<T>,
     onMessageReceived?: (message: SignalingMessage<T>) => void,
   ): void {
@@ -32,10 +37,10 @@ export class FirestoreSignalingMessageService {
 
     this.unsubscribeFromMessages = this.gateway.subscribeToMessages(
       this.roomId,
-      participantId,
+      peerId,
       (message) =>
         void this.handleReceivedMessage(
-          participantId,
+          peerId,
           messageHandler,
           onMessageReceived,
           message as SignalingMessage<T>,
@@ -49,7 +54,7 @@ export class FirestoreSignalingMessageService {
   }
 
   private async handleReceivedMessage<T>(
-    participantId: PeerId,
+    peerId: SignalingPeerId,
     messageHandler: MessageHandler<T>,
     onMessageReceived: ((message: SignalingMessage<T>) => void) | undefined,
     message: SignalingMessage<T>,
@@ -59,7 +64,7 @@ export class FirestoreSignalingMessageService {
 
       onMessageReceived?.(message);
 
-      await this.gateway.deleteMessage(this.roomId, participantId, message.id);
+      await this.gateway.deleteMessage(this.roomId, peerId, message.id);
     } catch (error) {
       console.error(
         `Failed to handle signaling message "${message.id}".`,

@@ -5,19 +5,19 @@ import { useEffect, useState } from "react";
 import { SignalingServiceRoot } from "@/infrastructure/signaling";
 
 import type {
-  Participant,
-  PeerId,
+  SignalingPeer,
+  SignalingPeerId,
   SignalingMessage,
 } from "@/infrastructure/signaling/types";
 
 export function SignalingServiceRootTest() {
   const [roomId, setRoomId] = useState("test-room");
 
-  const [peerId, setPeerId] = useState<PeerId>("");
+  const [peerId, setPeerId] = useState<SignalingPeerId>("");
 
   const [joined, setJoined] = useState(false);
 
-  const [participants, setParticipants] = useState<Participant[]>([]);
+  const [signalingPeers, setSignalingPeers] = useState<SignalingPeer[]>([]);
 
   const [selectedPeerId, setSelectedPeerId] = useState("");
 
@@ -41,20 +41,18 @@ export function SignalingServiceRootTest() {
   }
 
   useEffect(() => {
-    const removeJoinedListener = service.onParticipantJoined((participant) => {
-      log(`Participant joined: ${participant.peerId}`);
+    const removeJoinedListener = service.onSignalingPeerJoined((peer) => {
+      log(`Signaling peer joined: ${peer.peerId}`);
 
-      setParticipants(service.getParticipants());
+      setSignalingPeers(service.getSignalingPeers());
     });
 
-    const removeLeftListener = service.onParticipantLeft((participant) => {
-      log(`Participant left: ${participant.peerId}`);
+    const removeLeftListener = service.onSignalingPeerLeft((peer) => {
+      log(`Signaling peer left: ${peer.peerId}`);
 
-      setParticipants(service.getParticipants());
+      setSignalingPeers(service.getSignalingPeers());
 
-      setSelectedPeerId((current) =>
-        current === participant.peerId ? "" : current,
-      );
+      setSelectedPeerId((current) => (current === peer.peerId ? "" : current));
     });
 
     const removeSignalListener = service.onSignalReceived((message) => {
@@ -82,7 +80,7 @@ export function SignalingServiceRootTest() {
 
       setPeerId(id);
       setJoined(true);
-      setParticipants(service.getParticipants());
+      setSignalingPeers(service.getSignalingPeers());
 
       log(`Joined room: ${roomId}`);
     } catch (error) {
@@ -97,7 +95,7 @@ export function SignalingServiceRootTest() {
       await service.leaveRoom();
 
       setJoined(false);
-      setParticipants([]);
+      setSignalingPeers([]);
       setSelectedPeerId("");
 
       log("Left room");
@@ -114,7 +112,7 @@ export function SignalingServiceRootTest() {
     setError(null);
 
     try {
-      await service.sendOfferToPeer(selectedPeerId, sdp);
+      await service.sendOfferToPeer(selectedPeerId, sdp, "remove");
 
       log(`Offer sent to ${selectedPeerId}`);
     } catch (error) {
@@ -146,11 +144,15 @@ export function SignalingServiceRootTest() {
     setError(null);
 
     try {
-      await service.sendIceCandidateToPeer(selectedPeerId, {
-        candidate,
-        sdpMid: "0",
-        sdpMLineIndex: 0,
-      });
+      await service.sendIceCandidateToPeer(
+        selectedPeerId,
+        {
+          candidate,
+          sdpMid: "0",
+          sdpMLineIndex: 0,
+        },
+        "remove",
+      );
 
       log(`ICE candidate sent to ${selectedPeerId}`);
     } catch (error) {
@@ -215,31 +217,27 @@ export function SignalingServiceRootTest() {
       {joined && (
         <>
           <section className="p-4 border rounded">
-            <h2 className="mb-3 font-semibold">Participants</h2>
+            <h2 className="mb-3 font-semibold">Signaling peers</h2>
 
-            {participants.length === 0 ? (
+            {signalingPeers.length === 0 ? (
               <p className="text-muted-foreground text-sm">
-                No other participants.
+                No other signaling peers.
               </p>
             ) : (
               <div className="flex flex-col gap-2">
-                {participants.map((participant) => (
+                {signalingPeers.map((peer) => (
                   <button
-                    key={participant.peerId}
+                    key={peer.peerId}
                     type="button"
-                    onClick={() => setSelectedPeerId(participant.peerId)}
+                    onClick={() => setSelectedPeerId(peer.peerId)}
                     className={`rounded border p-3 text-left ${
-                      selectedPeerId === participant.peerId
-                        ? "border-primary"
-                        : ""
+                      selectedPeerId === peer.peerId ? "border-primary" : ""
                     }`}
                   >
-                    <code className="text-sm break-all">
-                      {participant.peerId}
-                    </code>
+                    <code className="text-sm break-all">{peer.peerId}</code>
 
                     <div className="mt-1 text-muted-foreground text-xs">
-                      Joined: {participant.joinedAt.toLocaleString()}
+                      Joined: {peer.joinedAt.toLocaleString()}
                     </div>
                   </button>
                 ))}
@@ -253,7 +251,7 @@ export function SignalingServiceRootTest() {
             <div className="mb-4 text-sm">
               To:{" "}
               <code className="break-all">
-                {selectedPeerId || "No participant selected"}
+                {selectedPeerId || "No signaling peer selected"}
               </code>
             </div>
 

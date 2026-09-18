@@ -1,23 +1,23 @@
 export type RoomId = string;
-export type PeerId = string;
+export type SignalingPeerId = string;
 export type MessageId = string;
 
-export interface Participant {
-  peerId: PeerId;
+export interface SignalingPeer {
+  peerId: SignalingPeerId;
   joinedAt: Date;
 }
 
 export interface SignalingMessage<T = unknown> {
   id: MessageId;
-  fromPeerId: PeerId;
-  toPeerId: PeerId;
+  fromPeerId: SignalingPeerId;
+  toPeerId: SignalingPeerId;
   timestamp: Date;
   payload: T;
 }
 
 export interface SendMessageInput<T = unknown> {
-  fromPeerId: PeerId;
-  toPeerId: PeerId;
+  fromPeerId: SignalingPeerId;
+  toPeerId: SignalingPeerId;
   payload: T;
 }
 
