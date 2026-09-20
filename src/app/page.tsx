@@ -2,7 +2,7 @@ import { HostElectionTest } from "@/presentation/temp/HostElectionTest";
 import { RtcManualTest } from "@/presentation/temp/RtcManualTest";
 import { SignalingServiceRootTest } from "@/presentation/temp/SignalingRootTest";
 import { WebRtcServiceTest } from "@/presentation/temp/WebRtcServiceTest";
-import { WebRtcTest } from "@/presentation/temp/WebRtcTest";
+import { WebRtcAutoTest } from "@/presentation/temp/WebRtcAutoTest";
 
 interface HomeProps {
   searchParams: Promise<{
@@ -13,5 +13,5 @@ interface HomeProps {
 export default async function Home({ searchParams }: HomeProps) {
   const params = await searchParams;
 
-  return <WebRtcServiceTest />;
+  return <WebRtcAutoTest />;
 }

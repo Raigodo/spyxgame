@@ -1,4 +1,5 @@
 import { FirestoreGateway } from "./firestore-gateway";
+import { SignalingPeerTracker } from "./signaling-peer-tracker";
 import type { SignalingPeerId, RoomId, SignalingPeer } from "./types";
 
 export interface HostDocument {
@@ -15,13 +16,18 @@ export class FirestoreHostService {
   constructor(
     private readonly gateway: FirestoreGateway,
     private readonly roomId: RoomId,
+    private readonly localPeer: SignalingPeer, // ← full object
+    private readonly tracker: SignalingPeerTracker,
   ) {}
+
+  get localPeerId(): SignalingPeerId {
+    return this.localPeer.peerId;
+  }
 
   // ─── Lifecycle ────────────────────────────────────────────────────────────
 
   start(): void {
     console.log("[FirestoreHostService] Starting");
-
     this.unsubscribeFromHost = this.gateway.subscribeToHostCandidate(
       this.roomId,
       (host) => {
@@ -50,9 +56,7 @@ export class FirestoreHostService {
   }
 
   async putNewHost(peerId: SignalingPeerId): Promise<void> {
-    console.log(
-      `[FirestoreHostService] Writing host candidate: ${short(peerId)}`,
-    );
+    console.log(`[FirestoreHostService] Writing host: ${short(peerId)}`);
     await this.gateway.writeHostCandidate(this.roomId, peerId);
   }
 
@@ -65,38 +69,39 @@ export class FirestoreHostService {
     return this.gateway.getHostCandidate(this.roomId);
   }
 
-  // Fetches all peers from Firestore, sorts by joinedAt, and nominates
-  // the next peer after the current host. If no host exists, nominates
-  // the oldest peer. Writes the result to Firestore.
-  async electNextHost(): Promise<SignalingPeerId | null> {
+  // Returns all peers sorted by joinedAt ascending — the host candidate line.
+  // Uses local tracker, no Firestore call. Includes local peer in the list.
+  getCandidatesInLine(): SignalingPeer[] {
+    const allPeers = [
+      ...this.tracker.getAll(),
+      this.localPeer, // ← local peer must be included
+    ];
+
+    return allPeers.sort((a, b) => a.joinedAt.getTime() - b.joinedAt.getTime());
+  }
+
+  // Elects next host using local tracker peers — no Firestore fetch.
+  async electNextHost(
+    excludePeerId?: SignalingPeerId,
+  ): Promise<SignalingPeerId | null> {
     console.log("[FirestoreHostService] Electing next host");
 
-    const [peers, currentHost] = await Promise.all([
-      this.gateway.getSignalingPeers(this.roomId),
-      this.gateway.getHostCandidate(this.roomId),
-    ]);
+    const candidates = this.getCandidatesInLine().filter(
+      (p) => p.peerId !== excludePeerId,
+    );
 
-    if (peers.length === 0) {
+    if (candidates.length === 0) {
       console.warn("[FirestoreHostService] No peers available for election");
       return null;
     }
 
-    const sorted = [...peers].sort(
-      (a, b) => a.joinedAt.getTime() - b.joinedAt.getTime(),
-    );
-
-    const nextCandidate = this.pickNextCandidate(sorted, currentHost);
-
-    if (!nextCandidate) {
-      console.warn("[FirestoreHostService] No next candidate found");
-      return null;
-    }
+    // Oldest peer in remaining candidates becomes host.
+    const nextCandidate = candidates[0];
 
     console.log(
-      `[FirestoreHostService] Next host candidate: ${short(nextCandidate.peerId)}`,
+      `[FirestoreHostService] Writing next host: ${short(nextCandidate.peerId)}`,
     );
     await this.gateway.writeHostCandidate(this.roomId, nextCandidate.peerId);
-
     return nextCandidate.peerId;
   }
 
@@ -107,7 +112,6 @@ export class FirestoreHostService {
     currentHost: HostDocument | null,
   ): SignalingPeer | null {
     if (!currentHost) {
-      // No current host — oldest peer is first candidate.
       return sortedPeers[0] ?? null;
     }
 
@@ -116,11 +120,9 @@ export class FirestoreHostService {
     );
 
     if (currentIndex === -1) {
-      // Current host no longer in peer list — start from oldest.
       return sortedPeers[0] ?? null;
     }
 
-    // Next peer after current host in sorted order.
     return sortedPeers[currentIndex + 1] ?? null;
   }
 }

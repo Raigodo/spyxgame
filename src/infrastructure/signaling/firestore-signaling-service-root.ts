@@ -65,9 +65,8 @@ export class FirestoreSignalingServiceRoot {
     this.localRoomId = roomId;
     this.localPeerId = peerId;
 
-    await this.gateway.addSignalingPeer(roomId, peerId, {
-      joinedAt: new Date(),
-    });
+    const joinedAt = new Date();
+    await this.gateway.addSignalingPeer(roomId, peerId, { joinedAt });
 
     this.localMessageService = new FirestoreSignalingMessageService(
       this.gateway,
@@ -89,7 +88,12 @@ export class FirestoreSignalingServiceRoot {
 
     this.startTrackingSignalingPeers();
 
-    this.hostService = new FirestoreHostService(this.gateway, roomId);
+    this.hostService = new FirestoreHostService(
+      this.gateway,
+      roomId,
+      { peerId, joinedAt }, // full SignalingPeer so getCandidatesInLine includes local peer
+      this.tracker,
+    );
     this.hostService.start();
 
     return peerId;
