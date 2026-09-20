@@ -1,6 +1,7 @@
 import { Countdown } from "./countdown";
 import { firestoreClient } from "./firestore-client";
 import { FirestoreGateway } from "./firestore-gateway";
+import { FirestoreHostService } from "./firestore-host-service";
 import { FirestoreSignalingMessageService } from "./firestore-signaling-message-service";
 import { SignalingPeerTracker } from "./signaling-peer-tracker";
 
@@ -17,6 +18,7 @@ type SignalReceivedHandler = (message: SignalingMessage<WebRtcSignal>) => void;
 export class FirestoreSignalingServiceRoot {
   private readonly gateway: FirestoreGateway;
   private readonly tracker = new SignalingPeerTracker();
+  private hostService?: FirestoreHostService;
 
   // Countdowns are keyed by peerId, separate from tracker state.
   // A countdown tracks whether a sent message was ever acknowledged.
@@ -30,8 +32,16 @@ export class FirestoreSignalingServiceRoot {
   private localMessageService?: FirestoreSignalingMessageService;
   private unsubscribeFromSignalingPeers?: () => void;
 
-  private roomId?: RoomId;
+  private localRoomId?: RoomId;
   private localPeerId?: SignalingPeerId;
+
+  get roomId() {
+    return this.localRoomId;
+  }
+
+  get peerid() {
+    return this.localPeerId;
+  }
 
   public constructor() {
     this.gateway = new FirestoreGateway(firestoreClient);
@@ -52,7 +62,7 @@ export class FirestoreSignalingServiceRoot {
       await this.gateway.createRoom(roomId);
     }
 
-    this.roomId = roomId;
+    this.localRoomId = roomId;
     this.localPeerId = peerId;
 
     await this.gateway.addSignalingPeer(roomId, peerId, {
@@ -79,35 +89,49 @@ export class FirestoreSignalingServiceRoot {
 
     this.startTrackingSignalingPeers();
 
+    this.hostService = new FirestoreHostService(this.gateway, roomId);
+    this.hostService.start();
+
     return peerId;
   }
 
   public async leaveRoom(): Promise<void> {
-    if (!this.roomId || !this.localPeerId) {
+    if (!this.localRoomId || !this.localPeerId) {
       return;
     }
 
-    const roomId = this.roomId;
+    const roomId = this.localRoomId;
     const localPeerId = this.localPeerId;
 
     this.stopTrackingSignalingPeers();
-
     this.localMessageService?.stopHandlingMessages();
     this.localMessageService = undefined;
 
-    // Stop all pending timeouts before clearing tracker —
-    // tracker.clear() will fire onPeerRemoved for each peer.
-    for (const countdown of this.pendingMessageTimeouts.values()) {
-      countdown.stop();
+    // If this peer is the current host, clear the host document.
+    const currentHost = await this.gateway.getHostCandidate(roomId);
+    if (currentHost?.signalingPeerId === localPeerId) {
+      console.log(
+        "[FirestoreSignalingServiceRoot] Leaving as host — clearing host document",
+      );
+      await this.gateway.clearHostCandidate(roomId);
     }
-    this.pendingMessageTimeouts.clear();
+
+    this.hostService?.stop();
+    this.hostService = undefined;
 
     this.tracker.clear();
 
     await this.gateway.removeSignalingPeer(roomId, localPeerId);
 
-    this.roomId = undefined;
+    this.localRoomId = undefined;
     this.localPeerId = undefined;
+  }
+
+  public get host(): FirestoreHostService {
+    if (!this.hostService) {
+      throw new Error("[FirestoreSignalingServiceRoot] Not joined to a room.");
+    }
+    return this.hostService;
   }
 
   public getSignalingPeers(): SignalingPeer[] {
@@ -203,14 +227,14 @@ export class FirestoreSignalingServiceRoot {
       countdown = new Countdown(async () => {
         this.pendingMessageTimeouts.delete(peerId);
 
-        if (onIgnoredStrategy === "remove" && this.roomId) {
+        if (onIgnoredStrategy === "remove" && this.localRoomId) {
           const stillPending = await this.gateway.messageExists(
-            this.roomId,
+            this.localRoomId,
             peerId,
             message.id,
           );
           if (stillPending) {
-            await this.gateway.removeSignalingPeer(this.roomId, peerId);
+            await this.gateway.removeSignalingPeer(this.localRoomId, peerId);
           }
         }
       });
@@ -221,12 +245,12 @@ export class FirestoreSignalingServiceRoot {
   }
 
   private startTrackingSignalingPeers(): void {
-    if (!this.roomId) {
+    if (!this.localRoomId) {
       return;
     }
 
     this.unsubscribeFromSignalingPeers = this.gateway.subscribeToSignalingPeers(
-      this.roomId,
+      this.localRoomId,
       (peers) => this.reconcilePeers(peers),
     );
   }

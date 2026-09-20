@@ -1,40 +1,35 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
-import { WebRtcService } from "@/infrastructure/webrtc/web-rtc-service";
-import type { RtcPeerStatus } from "@infrastructure/webrtc/types";
-import type { SignalingPeerId } from "@infrastructure/signaling/types";
+import { WebRtcService } from "@infrastructure/webrtc/web-rtc-service";
 
 const ROOM_ID = "test-room";
-const TEST_MESSAGE = "hello from peer!";
-
-interface PeerRow {
-  signalingPeerId: SignalingPeerId;
-  status: RtcPeerStatus;
-}
+const TEST_MESSAGE = "hello!";
 
 interface LogEntry {
   timestamp: string;
   text: string;
 }
 
-export function WebRtcTest() {
+interface PeerRow {
+  signalingPeerId: string;
+  status: string;
+}
+
+export function WebRtcServiceTest() {
   const [joined, setJoined] = useState(false);
-  const [isHost, setIsHost] = useState(false);
   const [peers, setPeers] = useState<PeerRow[]>([]);
   const [log, setLog] = useState<LogEntry[]>([]);
 
   const serviceRef = useRef<WebRtcService | null>(null);
 
   function addLog(text: string) {
-    const timestamp = new Date().toLocaleTimeString();
+    const timestamp = new Date().toLocaleTimeString("en", { hour12: false });
     setLog((prev) => [...prev, { timestamp, text }]);
   }
 
   const refreshPeers = useCallback(() => {
-    const service = serviceRef.current;
-    if (!service) return;
-    setPeers(service.getRtcPeers());
+    setPeers(serviceRef.current?.getRtcPeers() ?? []);
   }, []);
 
   async function handleJoin() {
@@ -43,7 +38,7 @@ export function WebRtcTest() {
 
     service.onRtcPeerJoined((peer) => {
       addLog(
-        `Peer joined: ${short(peer.signalingPeerId)} — status=${peer.status}`,
+        `Peer joined: ${short(peer.signalingPeerId)} status=${peer.status}`,
       );
       refreshPeers();
     });
@@ -57,9 +52,9 @@ export function WebRtcTest() {
       addLog(`Message from ${short(from)}: "${message}"`);
     });
 
-    await service.joinRoom(ROOM_ID, isHost);
+    await service.joinRoom(ROOM_ID);
     setJoined(true);
-    addLog(`Joined room="${ROOM_ID}" as ${isHost ? "host" : "guest"}`);
+    addLog(`Joined room="${ROOM_ID}"`);
   }
 
   async function handleLeave() {
@@ -70,9 +65,21 @@ export function WebRtcTest() {
     addLog("Left room");
   }
 
-  function handleSendDirect(signalingPeerId: SignalingPeerId) {
+  async function handleBecomeHost() {
+    await serviceRef.current?.setRole(true);
+    addLog("Role set → host");
+    refreshPeers();
+  }
+
+  async function handleBecomeGuest() {
+    await serviceRef.current?.setRole(false);
+    addLog("Role set → guest");
+    refreshPeers();
+  }
+
+  function handleSendDirect(signalingPeerId: string) {
     serviceRef.current?.sendMessageToPeer(signalingPeerId, TEST_MESSAGE);
-    addLog(`Sent direct to ${short(signalingPeerId)}: "${TEST_MESSAGE}"`);
+    addLog(`Sent to ${short(signalingPeerId)}: "${TEST_MESSAGE}"`);
   }
 
   function handleBroadcast() {
@@ -80,7 +87,7 @@ export function WebRtcTest() {
     addLog(`Broadcast: "${TEST_MESSAGE}"`);
   }
 
-  // Periodically refresh peer statuses to catch connecting → active transitions.
+  // Refresh peer statuses every second to catch connecting → active.
   useEffect(() => {
     if (!joined) return;
     const interval = setInterval(refreshPeers, 1000);
@@ -96,34 +103,29 @@ export function WebRtcTest() {
 
       {/* ─── Join / leave ─── */}
       {!joined ? (
-        <div className="flex items-center gap-4">
-          <label className="flex items-center gap-2 text-gray-700 text-sm cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={isHost}
-              onChange={(e) => setIsHost(e.target.checked)}
-              className="w-4 h-4"
-            />
-            Join as host
-          </label>
-          <button
-            onClick={handleJoin}
-            className="bg-gray-800 hover:bg-gray-700 px-4 py-2 rounded-lg text-white text-sm transition-colors"
-          >
-            Join room
-          </button>
-        </div>
+        <button
+          onClick={handleJoin}
+          className="bg-gray-800 hover:bg-gray-700 px-4 py-2 rounded-lg text-white text-sm transition-colors"
+        >
+          Join room
+        </button>
       ) : (
-        <div className="flex items-center gap-4">
-          <span className="text-gray-500 text-sm">
-            Joined as{" "}
-            <span className="font-medium text-gray-800">
-              {isHost ? "host" : "guest"}
-            </span>
-          </span>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={handleBecomeHost}
+            className="bg-blue-600 hover:bg-blue-700 px-3 py-1.5 rounded-lg text-white text-sm transition-colors"
+          >
+            Become host
+          </button>
+          <button
+            onClick={handleBecomeGuest}
+            className="bg-gray-100 hover:bg-gray-200 px-3 py-1.5 rounded-lg text-gray-800 text-sm transition-colors"
+          >
+            Become guest
+          </button>
           <button
             onClick={handleLeave}
-            className="bg-red-50 hover:bg-red-100 px-4 py-2 rounded-lg text-red-600 text-sm transition-colors"
+            className="bg-red-50 hover:bg-red-100 px-3 py-1.5 rounded-lg text-red-600 text-sm transition-colors"
           >
             Leave room
           </button>
@@ -134,10 +136,10 @@ export function WebRtcTest() {
       {joined && (
         <div className="space-y-2">
           <div className="flex justify-between items-center">
-            <h3 className="font-medium text-gray-700 text-sm">
-              Active peers ({peers.length})
-            </h3>
-            {peers.length > 0 && (
+            <p className="font-medium text-gray-700 text-sm">
+              RTC peers ({peers.length})
+            </p>
+            {peers.some((p) => p.status === "active") && (
               <button
                 onClick={handleBroadcast}
                 className="bg-blue-600 hover:bg-blue-700 px-3 py-1.5 rounded-lg text-white text-xs transition-colors"
@@ -149,7 +151,7 @@ export function WebRtcTest() {
 
           {peers.length === 0 ? (
             <p className="text-gray-400 text-sm">
-              No peers yet — open another tab and join.
+              No peers yet — open another tab and become host.
             </p>
           ) : (
             <div className="border border-gray-200 rounded-lg divide-y divide-gray-100 overflow-hidden">
@@ -184,7 +186,7 @@ export function WebRtcTest() {
       {/* ─── Log ─── */}
       <div className="space-y-2">
         <div className="flex justify-between items-center">
-          <h3 className="font-medium text-gray-700 text-sm">Log</h3>
+          <p className="font-medium text-gray-700 text-sm">Log</p>
           <button
             onClick={() => setLog([])}
             className="text-gray-400 hover:text-gray-600 text-xs transition-colors"
@@ -192,13 +194,15 @@ export function WebRtcTest() {
             Clear
           </button>
         </div>
-        <div className="space-y-1 bg-gray-50 p-3 border border-gray-200 rounded-lg h-56 overflow-y-auto">
+        <div className="space-y-1 bg-gray-50 p-3 border border-gray-200 rounded-lg h-64 overflow-y-auto">
           {log.length === 0 && (
             <p className="text-gray-400 text-sm">Nothing yet…</p>
           )}
           {log.map((entry, i) => (
             <div key={i} className="flex gap-2 text-xs">
-              <span className="text-gray-400 shrink-0">{entry.timestamp}</span>
+              <span className="tabular-nums text-gray-400 shrink-0">
+                {entry.timestamp}
+              </span>
               <span className="text-gray-700">{entry.text}</span>
             </div>
           ))}
@@ -208,19 +212,21 @@ export function WebRtcTest() {
   );
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function short(id: string): string {
-  return id.slice(0, 8);
-}
-
-function StatusDot({ status }: { status: RtcPeerStatus }) {
-  const colors: Record<RtcPeerStatus, string> = {
+function StatusDot({ status }: { status: string }) {
+  const colors: Record<string, string> = {
     connecting: "bg-yellow-400",
     active: "bg-green-500",
     reconnecting: "bg-yellow-400 animate-pulse",
     dead: "bg-red-400",
   };
 
-  return <span className={`w-2 h-2 rounded-full shrink-0 ${colors[status]}`} />;
+  return (
+    <span
+      className={`w-2 h-2 rounded-full shrink-0 ${colors[status] ?? "bg-gray-300"}`}
+    />
+  );
+}
+
+function short(id: string): string {
+  return id.slice(0, 8);
 }

@@ -21,6 +21,7 @@ import type {
   RoomId,
   SignalingMessage,
 } from "./types";
+import { HostDocument } from "./firestore-host-service";
 
 interface FirestoreMessage {
   fromPeerId: string;
@@ -216,5 +217,58 @@ export class FirestoreGateway {
         console.warn("Failed to subscribe to signaling peers:", error);
       },
     );
+  }
+
+  //Host
+
+  async getHostCandidate(roomId: RoomId): Promise<HostDocument | null> {
+    const snapshot = await getDoc(this.hostRef(roomId));
+    if (!snapshot.exists()) return null;
+    const data = snapshot.data();
+    return {
+      signalingPeerId: data.signalingPeerId,
+      nominatedAt: (data.nominatedAt as Timestamp).toDate(),
+    };
+  }
+
+  private hostRef(roomId: RoomId) {
+    return doc(this.client, "rooms", roomId, "host", "current");
+  }
+
+  async writeHostCandidate(
+    roomId: RoomId,
+    peerId: SignalingPeerId,
+  ): Promise<void> {
+    await setDoc(this.hostRef(roomId), {
+      signalingPeerId: peerId,
+      nominatedAt: serverTimestamp(),
+    });
+  }
+
+  async clearHostCandidate(roomId: RoomId): Promise<void> {
+    await deleteDoc(this.hostRef(roomId));
+  }
+
+  subscribeToHostCandidate(
+    roomId: RoomId,
+    onChange: (host: HostDocument | null) => void,
+  ): Unsubscribe {
+    return onSnapshot(this.hostRef(roomId), (snapshot) => {
+      if (!snapshot.exists()) {
+        onChange(null);
+        return;
+      }
+      const data = snapshot.data();
+
+      if (!data.nominatedAt) {
+        console.warn("host niminated at was null, short circuit returned");
+        return;
+      }
+
+      onChange({
+        signalingPeerId: data.signalingPeerId as SignalingPeerId,
+        nominatedAt: (data.nominatedAt as Timestamp).toDate(),
+      });
+    });
   }
 }

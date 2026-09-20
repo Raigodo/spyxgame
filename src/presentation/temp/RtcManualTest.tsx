@@ -1,8 +1,8 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { RtcConnectionFactory } from "@infrastructure/webrtc/attempt-2/rtc-connection-factory";
-import type { ActiveRtcConnection } from "@infrastructure/webrtc/attempt-2/active-rtc-connection";
+import { RtcConnectionFactory } from "@/infrastructure/webrtc/rtc-connection-factory";
+import type { ActiveRtcConnection } from "@/infrastructure/webrtc/active-rtc-connection";
 
 // ─── Root ─────────────────────────────────────────────────────────────────────
 

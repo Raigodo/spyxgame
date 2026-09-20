@@ -20,7 +20,55 @@ interface PeerEntry {
 type RtcPeerHandler = (peer: RtcPeer) => void;
 type RtcMessageHandler = (message: string, from: SignalingPeerId) => void;
 
+function short(id: string): string {
+  return id.slice(0, 8);
+}
+
 export class WebRtcService {
+  async setRole(isHost: boolean): Promise<void> {
+    if (this.isHost === isHost) return;
+
+    console.log(
+      `[WebRtcService] Role changing: ${this.isHost ? "host" : "guest"} → ${isHost ? "host" : "guest"}`,
+    );
+
+    this.isHost = isHost;
+
+    if (!isHost) {
+      // Becoming guest — abandon all connections.
+      // New host will reach out with fresh offers.
+      console.log("[WebRtcService] Became guest — disposing all peer entries");
+      for (const [signalingPeerId, entry] of this.peers) {
+        this.disposeEntry(entry);
+        this.peers.delete(signalingPeerId);
+        this.notifyPeerLeft(signalingPeerId, entry);
+      }
+      return;
+    }
+
+    // Becoming host — keep existing connections, create missing ones.
+    console.log(
+      "[WebRtcService] Became host — connecting to any unconnected peers",
+    );
+
+    for (const peer of this.signalingService.getSignalingPeers()) {
+      if (this.peers.has(peer.peerId)) {
+        console.log(
+          `[WebRtcService] Already have entry for peer=${short(peer.peerId)}, keeping`,
+        );
+        continue;
+      }
+
+      console.log(
+        `[WebRtcService] No entry for peer=${short(peer.peerId)}, creating and offering`,
+      );
+      const entry = this.createEntry(peer.peerId);
+      this.peers.set(peer.peerId, entry);
+      this.notifyPeerJoined(peer.peerId, entry);
+      await this.initiateOffer(peer.peerId, entry);
+    }
+  }
+
   private readonly signalingService = new SignalingServiceRoot();
   private readonly peers = new Map<SignalingPeerId, PeerEntry>();
 
@@ -30,21 +78,20 @@ export class WebRtcService {
 
   private readonly cleanupFns: Array<() => void> = [];
 
+  private leaving = false;
   private isHost = false;
   private joined = false;
 
   // ─── Public API ───────────────────────────────────────────────────────────
 
-  async joinRoom(roomId: RoomId, isHost: boolean): Promise<void> {
+  async joinRoom(roomId: RoomId): Promise<void> {
     if (this.joined) {
       throw new Error("[WebRtcService] Already joined a room.");
     }
-
-    this.isHost = isHost;
     this.joined = true;
+    this.isHost = false; // always start as guest, role assigned via setRole
 
-    console.log(`[WebRtcService] Joining room=${roomId} isHost=${isHost}`);
-
+    console.log(`[WebRtcService] Joining room=${roomId}`);
     await this.signalingService.joinRoom(roomId);
 
     this.cleanupFns.push(
@@ -76,6 +123,7 @@ export class WebRtcService {
   async leaveRoom(): Promise<void> {
     if (!this.joined) return;
 
+    this.leaving = true; // ← set before any disposal
     console.log("[WebRtcService] Leaving room");
 
     for (const cleanup of this.cleanupFns) cleanup();
@@ -90,6 +138,7 @@ export class WebRtcService {
     await this.signalingService.leaveRoom();
 
     this.joined = false;
+    this.leaving = false;
   }
 
   getRtcPeers(): RtcPeer[] {
@@ -322,26 +371,56 @@ export class WebRtcService {
   private async handleConnectionDied(
     signalingPeerId: SignalingPeerId,
   ): Promise<void> {
+    if (this.leaving) {
+      console.log(
+        `[WebRtcService] Ignoring connection death during leave for peer=${short(signalingPeerId)}`,
+      );
+      return;
+    }
+
     const entry = this.peers.get(signalingPeerId);
     if (!entry) return;
 
     console.warn(
-      `[WebRtcService] Connection died for peer=${signalingPeerId}, reconnecting`,
+      `[WebRtcService] Connection died for peer=${short(signalingPeerId)}`,
     );
 
-    // Dispose old factory and connection, create a fresh one.
     this.disposeEntry(entry);
 
-    const newEntry = this.createEntry(signalingPeerId);
-    newEntry.status = "reconnecting";
-    this.peers.set(signalingPeerId, newEntry);
-
-    this.setEntryStatus(signalingPeerId, newEntry, "reconnecting");
-
     if (this.isHost) {
+      // Host recreates the connection and sends a new offer.
+      const newEntry = this.createEntry(signalingPeerId);
+      newEntry.status = "reconnecting";
+      this.peers.set(signalingPeerId, newEntry);
+      this.setEntryStatus(signalingPeerId, newEntry, "reconnecting");
       await this.initiateOffer(signalingPeerId, newEntry);
+      return;
     }
-    // Guest waits for a new offer from host.
+
+    // Guest — mark as reconnecting and wait 5s for the host to reach out.
+    // If no offer arrives within that window, remove the entry entirely.
+    const reconnectingEntry = this.createEntry(signalingPeerId);
+    reconnectingEntry.status = "reconnecting";
+    this.peers.set(signalingPeerId, reconnectingEntry);
+    this.setEntryStatus(signalingPeerId, reconnectingEntry, "reconnecting");
+
+    console.log(
+      `[WebRtcService] Guest waiting 5s for new offer from peer=${short(signalingPeerId)}`,
+    );
+
+    setTimeout(() => {
+      const current = this.peers.get(signalingPeerId);
+
+      // If the entry is still reconnecting, no offer arrived — remove it.
+      if (current && current.status === "reconnecting") {
+        console.warn(
+          `[WebRtcService] No offer received from peer=${short(signalingPeerId)} — removing`,
+        );
+        this.disposeEntry(current);
+        this.peers.delete(signalingPeerId);
+        this.notifyPeerLeft(signalingPeerId, current);
+      }
+    }, 5_000);
   }
 
   private async initiateOffer(
