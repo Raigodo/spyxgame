@@ -39,7 +39,7 @@ export function WebRtcAutoTest() {
       return;
     }
 
-    setPeers(service.getRtcPeers());
+    setPeers(service.getPeers());
   }
 
   async function handleJoin() {
@@ -48,7 +48,7 @@ export function WebRtcAutoTest() {
     const service = new WebRtcService();
     serviceRef.current = service;
 
-    service.onRtcPeerJoined((peer) => {
+    service.onPeerJoined((peer) => {
       addLog(
         `RTC peer joined: ${short(peer.signalingPeerId)} status=${peer.status}`,
       );
@@ -56,7 +56,7 @@ export function WebRtcAutoTest() {
       refreshPeers();
     });
 
-    service.onRtcPeerLeft((peer) => {
+    service.onPeerLeft((peer) => {
       addLog(
         `RTC peer left: ${short(peer.signalingPeerId)} status=${peer.status}`,
       );
@@ -64,7 +64,7 @@ export function WebRtcAutoTest() {
       refreshPeers();
     });
 
-    service.onRtcMessage((message, from) => {
+    service.onMessage((message, from) => {
       addLog(`Message from ${short(from)}: "${message}"`);
     });
 

@@ -1,21 +1,21 @@
-import type { FirestoreGateway } from "./firestore-gateway";
+import type { SignalingMessageGateway } from "./signaling-message-gateway";
 import type {
   MessageHandler,
-  SignalingPeerId,
   RoomId,
   SignalingMessage,
+  SignalingPeerId,
 } from "./types";
 
-export class FirestoreSignalingMessageService {
+export class SignalingMailbox {
   private unsubscribeFromMessages?: () => void;
 
   public constructor(
-    private readonly gateway: FirestoreGateway,
+    private readonly gateway: SignalingMessageGateway,
     private readonly roomId: RoomId,
     private readonly currentPeerId: SignalingPeerId,
   ) {}
 
-  public async sendMessage<T>(
+  public async send<T>(
     message: Omit<SignalingMessage<T>, "timestamp" | "fromPeerId" | "id">,
   ): Promise<SignalingMessage> {
     const enhancedMessage = {
@@ -28,12 +28,12 @@ export class FirestoreSignalingMessageService {
     return enhancedMessage;
   }
 
-  public startHandlingMessagesForSignalingPeer<T>(
+  public startReceivingFor<T>(
     peerId: SignalingPeerId,
     messageHandler: MessageHandler<T>,
     onMessageReceived?: (message: SignalingMessage<T>) => void,
   ): void {
-    this.stopHandlingMessages();
+    this.stopReceiving();
 
     this.unsubscribeFromMessages = this.gateway.subscribeToMessages(
       this.roomId,
@@ -48,7 +48,7 @@ export class FirestoreSignalingMessageService {
     );
   }
 
-  public stopHandlingMessages(): void {
+  public stopReceiving(): void {
     this.unsubscribeFromMessages?.();
     this.unsubscribeFromMessages = undefined;
   }
@@ -61,13 +61,11 @@ export class FirestoreSignalingMessageService {
   ): Promise<void> {
     try {
       await messageHandler.handle(message);
-
       onMessageReceived?.(message);
-
       await this.gateway.deleteMessage(this.roomId, peerId, message.id);
     } catch (error) {
       console.warn(
-        `Failed to handle signaling message "${message.id}".`,
+        `[SignalingMailbox] Failed to handle signaling message "${message.id}".`,
         error,
       );
     }

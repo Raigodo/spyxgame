@@ -1,16 +1,18 @@
-// rtc-peer-entry-factory.ts
+// rtc-peer-link-factory.ts
 
 import { RtcConnectionFactory } from "./rtc-connection-factory";
 import type { PeerEntry, RtcPeerRegistry } from "./rtc-peer-registry";
-import type { SignalingPeerId } from "@infrastructure/signaling";
-import type { FirestoreSignalingServiceRoot } from "@infrastructure/signaling/firestore-signaling-service-root";
+import type {
+  SignalingPeerId,
+  SignalingSession,
+} from "@infrastructure/signaling";
 
 type MessageHandler = (message: string, from: SignalingPeerId) => void;
 type ConnectionDiedHandler = (signalingPeerId: SignalingPeerId) => void;
 
-export class RtcPeerEntryFactory {
+export class RtcPeerLinkFactory {
   constructor(
-    private readonly signalingService: FirestoreSignalingServiceRoot,
+    private readonly signalingSession: SignalingSession,
     private readonly registry: RtcPeerRegistry,
     private readonly onMessage: MessageHandler,
     private readonly onConnectionDied: ConnectionDiedHandler,
@@ -20,7 +22,7 @@ export class RtcPeerEntryFactory {
 
   create(signalingPeerId: SignalingPeerId): PeerEntry {
     console.log(
-      `[RtcPeerEntryFactory] Creating entry for peer=${short(signalingPeerId)}`,
+      `[RtcPeerLinkFactory] Creating link for peer=${short(signalingPeerId)}`,
     );
 
     const factory = new RtcConnectionFactory();
@@ -33,9 +35,9 @@ export class RtcPeerEntryFactory {
     factory.onIceCandidateCreated((candidate) => {
       if (this.isLeaving()) return;
       console.log(
-        `[RtcPeerEntryFactory] ICE candidate for peer=${short(signalingPeerId)}`,
+        `[RtcPeerLinkFactory] ICE candidate for peer=${short(signalingPeerId)}`,
       );
-      void this.signalingService.sendIceCandidateToPeer(
+      void this.signalingSession.sendIceCandidate(
         signalingPeerId,
         candidate,
         this.isHost() ? "remove" : "do-nothing",
@@ -45,9 +47,9 @@ export class RtcPeerEntryFactory {
     factory.onAnswerCreated((answer) => {
       if (this.isLeaving()) return;
       console.log(
-        `[RtcPeerEntryFactory] Answer created for peer=${short(signalingPeerId)}`,
+        `[RtcPeerLinkFactory] Answer created for peer=${short(signalingPeerId)}`,
       );
-      void this.signalingService.sendAnswerToPeer(
+      void this.signalingSession.sendAnswer(
         signalingPeerId,
         answer.sdp!,
         "do-nothing",
@@ -57,7 +59,7 @@ export class RtcPeerEntryFactory {
     factory.onConnected((connection) => {
       if (this.isLeaving()) return;
       console.log(
-        `[RtcPeerEntryFactory] Connected to peer=${short(signalingPeerId)}`,
+        `[RtcPeerLinkFactory] Connected to peer=${short(signalingPeerId)}`,
       );
 
       entry.connection = connection;
@@ -69,7 +71,7 @@ export class RtcPeerEntryFactory {
 
       connection.onStateChange((state) => {
         console.log(
-          `[RtcPeerEntryFactory] Connection state changed peer=${short(signalingPeerId)} state=${state}`,
+          `[RtcPeerLinkFactory] Connection state changed peer=${short(signalingPeerId)} state=${state}`,
         );
         if (state === "disconnected" || state === "failed") {
           this.onConnectionDied(signalingPeerId);
@@ -85,15 +87,15 @@ export class RtcPeerEntryFactory {
     entry: PeerEntry,
   ): Promise<void> {
     console.log(
-      `[RtcPeerEntryFactory] Initiating offer to peer=${short(signalingPeerId)}`,
+      `[RtcPeerLinkFactory] Initiating offer to peer=${short(signalingPeerId)}`,
     );
 
     entry.factory.onOfferCreated((offer) => {
       if (this.isLeaving()) return;
       console.log(
-        `[RtcPeerEntryFactory] Offer created for peer=${short(signalingPeerId)}`,
+        `[RtcPeerLinkFactory] Offer created for peer=${short(signalingPeerId)}`,
       );
-      void this.signalingService.sendOfferToPeer(
+      void this.signalingSession.sendOffer(
         signalingPeerId,
         offer.sdp!,
         this.isHost() ? "remove" : "do-nothing",
