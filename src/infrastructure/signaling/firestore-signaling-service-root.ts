@@ -11,6 +11,7 @@ import type {
   RoomId,
   SignalingMessage,
   WebRtcSignal,
+  MessageId,
 } from "./types";
 
 type SignalReceivedHandler = (message: SignalingMessage<WebRtcSignal>) => void;
@@ -25,6 +26,10 @@ export class FirestoreSignalingServiceRoot {
   private readonly pendingMessageTimeouts = new Map<
     SignalingPeerId,
     Countdown
+  >();
+  private readonly pendingSignals = new Map<
+    SignalingPeerId,
+    { messageId: MessageId; onIgnoredStrategy: "remove" | "do-nothing" }
   >();
 
   private readonly signalReceivedHandlers = new Set<SignalReceivedHandler>();
@@ -88,12 +93,10 @@ export class FirestoreSignalingServiceRoot {
 
     this.startTrackingSignalingPeers();
 
-    this.hostService = new FirestoreHostService(
-      this.gateway,
-      roomId,
-      { peerId, joinedAt }, // full SignalingPeer so getCandidatesInLine includes local peer
-      this.tracker,
-    );
+    this.hostService = new FirestoreHostService(this.gateway, roomId, {
+      peerId,
+      joinedAt,
+    });
     this.hostService.start();
 
     return peerId;
@@ -119,6 +122,12 @@ export class FirestoreSignalingServiceRoot {
       );
       await this.gateway.clearHostCandidate(roomId);
     }
+
+    // Best-effort cleanup of any election candidacy we registered — leaves
+    // no trace if we're leaving mid-election. Not required for correctness
+    // (getOrderedElectionCandidates already filters to live signaling
+    // peers), just tidier.
+    await this.hostService?.removeElectionCandidate();
 
     this.hostService?.stop();
     this.hostService = undefined;
@@ -223,6 +232,16 @@ export class FirestoreSignalingServiceRoot {
       payload: signal,
     });
 
+    // Always reflects the most recently sent, unacknowledged message for
+    // this peer. The countdown callback below is created once and reused
+    // across resets, so it must read this at fire-time rather than closing
+    // over a single send's message/strategy — otherwise a reused countdown
+    // checks a stale message id with a stale ignore-strategy.
+    this.pendingSignals.set(peerId, {
+      messageId: message.id,
+      onIgnoredStrategy,
+    });
+
     // One countdown per peer — reset it if a new message is sent before
     // the previous one was acknowledged. This avoids stacking timeouts.
     let countdown = this.pendingMessageTimeouts.get(peerId);
@@ -231,11 +250,15 @@ export class FirestoreSignalingServiceRoot {
       countdown = new Countdown(async () => {
         this.pendingMessageTimeouts.delete(peerId);
 
-        if (onIgnoredStrategy === "remove" && this.localRoomId) {
+        const pending = this.pendingSignals.get(peerId);
+        this.pendingSignals.delete(peerId);
+        if (!pending) return;
+
+        if (pending.onIgnoredStrategy === "remove" && this.localRoomId) {
           const stillPending = await this.gateway.messageExists(
             this.localRoomId,
             peerId,
-            message.id,
+            pending.messageId,
           );
           if (stillPending) {
             await this.gateway.removeSignalingPeer(this.localRoomId, peerId);
@@ -291,6 +314,7 @@ export class FirestoreSignalingServiceRoot {
         // Stop their timeout before removing.
         this.pendingMessageTimeouts.get(existing.peerId)?.stop();
         this.pendingMessageTimeouts.delete(existing.peerId);
+        this.pendingSignals.delete(existing.peerId);
 
         // tracker.remove fires onPeerRemoved after the peer is out of state.
         this.tracker.remove(existing.peerId);
@@ -302,6 +326,7 @@ export class FirestoreSignalingServiceRoot {
     // Stop the timeout — the remote peer acknowledged our signal.
     this.pendingMessageTimeouts.get(message.fromPeerId)?.stop();
     this.pendingMessageTimeouts.delete(message.fromPeerId);
+    this.pendingSignals.delete(message.fromPeerId);
 
     for (const handler of this.signalReceivedHandlers) {
       handler(message);

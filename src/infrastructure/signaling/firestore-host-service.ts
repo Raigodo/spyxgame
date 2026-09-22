@@ -1,5 +1,4 @@
 import { FirestoreGateway } from "./firestore-gateway";
-import { SignalingPeerTracker } from "./signaling-peer-tracker";
 import type { SignalingPeerId, RoomId, SignalingPeer } from "./types";
 
 export interface HostDocument {
@@ -16,8 +15,7 @@ export class FirestoreHostService {
   constructor(
     private readonly gateway: FirestoreGateway,
     private readonly roomId: RoomId,
-    private readonly localPeer: SignalingPeer, // ← full object
-    private readonly tracker: SignalingPeerTracker,
+    private readonly localPeer: SignalingPeer,
   ) {}
 
   get localPeerId(): SignalingPeerId {
@@ -69,61 +67,73 @@ export class FirestoreHostService {
     return this.gateway.getHostCandidate(this.roomId);
   }
 
-  // Returns all peers sorted by joinedAt ascending — the host candidate line.
-  // Uses local tracker, no Firestore call. Includes local peer in the list.
-  getCandidatesInLine(): SignalingPeer[] {
-    const allPeers = [
-      ...this.tracker.getAll(),
-      this.localPeer, // ← local peer must be included
-    ];
-
-    return allPeers.sort((a, b) => a.joinedAt.getTime() - b.joinedAt.getTime());
+  // Registers this peer as a replacement candidate for `deadHostPeerId`.
+  async registerAsElectionCandidate(
+    deadHostPeerId: SignalingPeerId,
+  ): Promise<void> {
+    console.log(
+      `[FirestoreHostService] Registering candidacy for dead host=${short(deadHostPeerId)}`,
+    );
+    await this.gateway.registerElectionCandidate(
+      this.roomId,
+      this.localPeerId,
+      deadHostPeerId,
+    );
   }
 
-  // Elects next host using local tracker peers — no Firestore fetch.
+  async removeElectionCandidate(): Promise<void> {
+    await this.gateway.deleteElectionCandidate(this.roomId, this.localPeerId);
+  }
+
+  // Every candidate that registered for this specific dead host AND is
+  // still a live signaling peer, right now — sorted deterministically
+  // (lexicographically) so any client calling this around the same time
+  // computes the identical order. Both underlying reads are one-shot
+  // Firestore fetches, not the locally-cached tracker: the tracker updates
+  // at different times per client, which is what made the old ordering
+  // diverge between peers and never converge.
+  async getOrderedElectionCandidates(
+    deadHostPeerId: SignalingPeerId,
+  ): Promise<SignalingPeerId[]> {
+    const [candidateIds, livePeers] = await Promise.all([
+      this.gateway.getElectionCandidates(this.roomId, deadHostPeerId),
+      this.gateway.getSignalingPeers(this.roomId),
+    ]);
+
+    const liveIds = new Set(livePeers.map((p) => p.peerId));
+    liveIds.add(this.localPeerId);
+
+    return candidateIds
+      .filter((id) => id !== deadHostPeerId && liveIds.has(id))
+      .sort();
+  }
+
+  // Elects a host from the currently live signaling peers, deterministically
+  // (lexicographic order), excluding `excludePeerId`. Used both for a fresh
+  // room's first host and for re-election after a confirmed death.
   async electNextHost(
     excludePeerId?: SignalingPeerId,
   ): Promise<SignalingPeerId | null> {
     console.log("[FirestoreHostService] Electing next host");
 
-    const candidates = this.getCandidatesInLine().filter(
-      (p) => p.peerId !== excludePeerId,
-    );
+    const livePeers = await this.gateway.getSignalingPeers(this.roomId);
+    const candidateIds = Array.from(
+      new Set([this.localPeerId, ...livePeers.map((p) => p.peerId)]),
+    )
+      .filter((id) => id !== excludePeerId)
+      .sort();
 
-    if (candidates.length === 0) {
+    if (candidateIds.length === 0) {
       console.warn("[FirestoreHostService] No peers available for election");
       return null;
     }
 
-    // Oldest peer in remaining candidates becomes host.
-    const nextCandidate = candidates[0];
-
+    const nextPeerId = candidateIds[0];
     console.log(
-      `[FirestoreHostService] Writing next host: ${short(nextCandidate.peerId)}`,
+      `[FirestoreHostService] Writing next host: ${short(nextPeerId)}`,
     );
-    await this.gateway.writeHostCandidate(this.roomId, nextCandidate.peerId);
-    return nextCandidate.peerId;
-  }
-
-  // ─── Private ─────────────────────────────────────────────────────────────
-
-  private pickNextCandidate(
-    sortedPeers: SignalingPeer[],
-    currentHost: HostDocument | null,
-  ): SignalingPeer | null {
-    if (!currentHost) {
-      return sortedPeers[0] ?? null;
-    }
-
-    const currentIndex = sortedPeers.findIndex(
-      (p) => p.peerId === currentHost.signalingPeerId,
-    );
-
-    if (currentIndex === -1) {
-      return sortedPeers[0] ?? null;
-    }
-
-    return sortedPeers[currentIndex + 1] ?? null;
+    await this.gateway.writeHostCandidate(this.roomId, nextPeerId);
+    return nextPeerId;
   }
 }
 

@@ -212,9 +212,12 @@ export class WebRtcService {
   ): Promise<void> {
     if (this.leaving) return;
 
+    // A host-document write always means an election has concluded — ours
+    // or a peer's. Cancel any countdown we still have running so we don't
+    // re-elect a second time on top of a result that already landed.
+    this.electionCoordinator.cancelCountdown();
+
     if (!host) {
-      // Host document cleared — cancel any countdown and elect next.
-      this.electionCoordinator.cancelCountdown();
       console.log(
         "[WebRtcService] Host document cleared — triggering election",
       );
@@ -231,7 +234,6 @@ export class WebRtcService {
 
     await this.setRole(iAmHost);
 
-    // Guest sees a host document — start timeout in case host is already dead.
     if (!iAmHost) {
       this.startOfferTimeout(host.signalingPeerId);
     }
@@ -298,12 +300,14 @@ export class WebRtcService {
     this.offerTimeouts.set(hostPeerId, timeout);
 
     // Also cancel when connection to any peer becomes active.
-    const unsub = this.registry.onAnyStatusChanged((status) => {
-      if (status === "active") {
-        this.clearOfferTimeout(hostPeerId);
-        unsub();
-      }
-    });
+    const unsub = this.registry.onAnyStatusChanged(
+      (status, signalingPeerId) => {
+        if (status === "active" && signalingPeerId === hostPeerId) {
+          this.clearOfferTimeout(hostPeerId);
+          unsub();
+        }
+      },
+    );
   }
 
   private clearOfferTimeout(hostPeerId: SignalingPeerId): void {

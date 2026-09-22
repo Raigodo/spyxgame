@@ -227,26 +227,10 @@ export class FirestoreGateway {
     const data = snapshot.data();
     return {
       signalingPeerId: data.signalingPeerId,
-      nominatedAt: (data.nominatedAt as Timestamp).toDate(),
+      nominatedAt: data.nominatedAt
+        ? (data.nominatedAt as Timestamp).toDate()
+        : new Date(),
     };
-  }
-
-  private hostRef(roomId: RoomId) {
-    return doc(this.client, "rooms", roomId, "host", "current");
-  }
-
-  async writeHostCandidate(
-    roomId: RoomId,
-    peerId: SignalingPeerId,
-  ): Promise<void> {
-    await setDoc(this.hostRef(roomId), {
-      signalingPeerId: peerId,
-      nominatedAt: serverTimestamp(),
-    });
-  }
-
-  async clearHostCandidate(roomId: RoomId): Promise<void> {
-    await deleteDoc(this.hostRef(roomId));
   }
 
   subscribeToHostCandidate(
@@ -260,15 +244,71 @@ export class FirestoreGateway {
       }
       const data = snapshot.data();
 
-      if (!data.nominatedAt) {
-        console.warn("host niminated at was null, short circuit returned");
-        return;
-      }
-
       onChange({
         signalingPeerId: data.signalingPeerId as SignalingPeerId,
-        nominatedAt: (data.nominatedAt as Timestamp).toDate(),
+        nominatedAt: data.nominatedAt
+          ? (data.nominatedAt as Timestamp).toDate()
+          : new Date(),
       });
     });
+  }
+
+  private hostRef(roomId: RoomId) {
+    return doc(this.client, "rooms", roomId, "host", "current");
+  }
+
+  async writeHostCandidate(
+    roomId: RoomId,
+    peerId: SignalingPeerId,
+  ): Promise<void> {
+    await setDoc(this.hostRef(roomId), {
+      signalingPeerId: peerId,
+      nominatedAt: Timestamp.now(),
+    });
+  }
+
+  async clearHostCandidate(roomId: RoomId): Promise<void> {
+    await deleteDoc(this.hostRef(roomId));
+  }
+
+  private electionCandidatesRef(roomId: RoomId) {
+    return collection(this.client, "rooms", roomId, "election-candidates");
+  }
+
+  private electionCandidateRef(roomId: RoomId, peerId: SignalingPeerId) {
+    return doc(this.client, "rooms", roomId, "election-candidates", peerId);
+  }
+
+  // Doc id is the peer's own id — a later registration (for a later death)
+  // always overwrites the previous one, so stale candidacies never need an
+  // explicit cleanup pass.
+  async registerElectionCandidate(
+    roomId: RoomId,
+    peerId: SignalingPeerId,
+    deadHostPeerId: SignalingPeerId,
+  ): Promise<void> {
+    await setDoc(this.electionCandidateRef(roomId, peerId), {
+      deadHostPeerId,
+    });
+  }
+
+  async deleteElectionCandidate(
+    roomId: RoomId,
+    peerId: SignalingPeerId,
+  ): Promise<void> {
+    await deleteDoc(this.electionCandidateRef(roomId, peerId));
+  }
+
+  // One-shot read (getDocs, not onSnapshot) — every client calling this at
+  // roughly the same time gets the same server-side snapshot, which is what
+  // makes the election ordering converge instead of diverging per-client.
+  async getElectionCandidates(
+    roomId: RoomId,
+    deadHostPeerId: SignalingPeerId,
+  ): Promise<SignalingPeerId[]> {
+    const snapshot = await getDocs(this.electionCandidatesRef(roomId));
+    return snapshot.docs
+      .filter((document) => document.data().deadHostPeerId === deadHostPeerId)
+      .map((document) => document.id as SignalingPeerId);
   }
 }
