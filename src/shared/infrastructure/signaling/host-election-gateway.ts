@@ -41,9 +41,7 @@ export class HostElectionGateway {
     const data = snapshot.data();
     return {
       signalingPeerId: data.signalingPeerId,
-      nominatedAt: data.nominatedAt
-        ? (data.nominatedAt as Timestamp).toDate()
-        : new Date(),
+      nominatedAt: data.nominatedAt ? (data.nominatedAt as Timestamp).toDate() : new Date(),
     };
   }
 
@@ -61,10 +59,7 @@ export class HostElectionGateway {
     await deleteDoc(this.hostRef(roomId));
   }
 
-  subscribeToHost(
-    roomId: RoomId,
-    onChange: (host: HostDocument | null) => void,
-  ): Unsubscribe {
+  subscribeToHost(roomId: RoomId, onChange: (host: HostDocument | null) => void): Unsubscribe {
     return onSnapshot(this.hostRef(roomId), (snapshot) => {
       if (!snapshot.exists()) {
         onChange(null);
@@ -73,9 +68,7 @@ export class HostElectionGateway {
       const data = snapshot.data();
       onChange({
         signalingPeerId: data.signalingPeerId as SignalingPeerId,
-        nominatedAt: data.nominatedAt
-          ? (data.nominatedAt as Timestamp).toDate()
-          : new Date(),
+        nominatedAt: data.nominatedAt ? (data.nominatedAt as Timestamp).toDate() : new Date(),
       });
     });
   }
@@ -87,15 +80,12 @@ export class HostElectionGateway {
   async registerCandidate(
     roomId: RoomId,
     peerId: SignalingPeerId,
-    deadHostPeerId: SignalingPeerId,
+    deadHostPeerId: SignalingPeerId
   ): Promise<void> {
     await setDoc(this.candidateRef(roomId, peerId), { deadHostPeerId });
   }
 
-  async removeCandidate(
-    roomId: RoomId,
-    peerId: SignalingPeerId,
-  ): Promise<void> {
+  async removeCandidate(roomId: RoomId, peerId: SignalingPeerId): Promise<void> {
     await deleteDoc(this.candidateRef(roomId, peerId));
   }
 
@@ -104,11 +94,16 @@ export class HostElectionGateway {
   // converge instead of diverging per-client.
   async listCandidates(
     roomId: RoomId,
-    deadHostPeerId: SignalingPeerId,
+    deadHostPeerId: SignalingPeerId
   ): Promise<SignalingPeerId[]> {
     const snapshot = await getDocs(this.candidatesRef(roomId));
     return snapshot.docs
       .filter((document) => document.data().deadHostPeerId === deadHostPeerId)
       .map((document) => document.id as SignalingPeerId);
+  }
+
+  async clearAllCandidates(roomId: RoomId): Promise<void> {
+    const snapshot = await getDocs(this.candidatesRef(roomId));
+    await Promise.all(snapshot.docs.map((document) => deleteDoc(document.ref)));
   }
 }

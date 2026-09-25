@@ -3,6 +3,7 @@ import {
   deleteDoc,
   doc,
   getDoc,
+  getDocs,
   onSnapshot,
   orderBy,
   query,
@@ -12,12 +13,7 @@ import {
   type Unsubscribe,
 } from "firebase/firestore";
 
-import type {
-  MessageId,
-  RoomId,
-  SignalingMessage,
-  SignalingPeerId,
-} from "./types";
+import type { MessageId, RoomId, SignalingMessage, SignalingPeerId } from "./types";
 
 interface FirestoreMessage {
   fromPeerId: string;
@@ -29,30 +25,11 @@ export class SignalingMessageGateway {
   public constructor(private readonly client: Firestore) {}
 
   private messagesRef(roomId: RoomId, peerId: SignalingPeerId) {
-    return collection(
-      this.client,
-      "rooms",
-      roomId,
-      "signaling-peers",
-      peerId,
-      "messages",
-    );
+    return collection(this.client, "rooms", roomId, "signaling-peers", peerId, "messages");
   }
 
-  private messageRef(
-    roomId: RoomId,
-    peerId: SignalingPeerId,
-    messageId: MessageId,
-  ) {
-    return doc(
-      this.client,
-      "rooms",
-      roomId,
-      "signaling-peers",
-      peerId,
-      "messages",
-      messageId,
-    );
+  private messageRef(roomId: RoomId, peerId: SignalingPeerId, messageId: MessageId) {
+    return doc(this.client, "rooms", roomId, "signaling-peers", peerId, "messages", messageId);
   }
 
   async addMessage(roomId: RoomId, message: SignalingMessage): Promise<void> {
@@ -66,7 +43,7 @@ export class SignalingMessageGateway {
   async deleteMessage(
     roomId: RoomId,
     peerId: SignalingPeerId,
-    messageId: MessageId,
+    messageId: MessageId
   ): Promise<void> {
     await deleteDoc(this.messageRef(roomId, peerId, messageId));
   }
@@ -74,7 +51,7 @@ export class SignalingMessageGateway {
   async messageExists(
     roomId: RoomId,
     peerId: SignalingPeerId,
-    messageId: MessageId,
+    messageId: MessageId
   ): Promise<boolean> {
     const snapshot = await getDoc(this.messageRef(roomId, peerId, messageId));
     return snapshot.exists();
@@ -83,12 +60,9 @@ export class SignalingMessageGateway {
   subscribeToMessages(
     roomId: RoomId,
     peerId: SignalingPeerId,
-    onMessage: (message: SignalingMessage) => void,
+    onMessage: (message: SignalingMessage) => void
   ): Unsubscribe {
-    const messagesQuery = query(
-      this.messagesRef(roomId, peerId),
-      orderBy("timestamp", "asc"),
-    );
+    const messagesQuery = query(this.messagesRef(roomId, peerId), orderBy("timestamp", "asc"));
 
     return onSnapshot(messagesQuery, (snapshot) => {
       for (const change of snapshot.docChanges()) {
@@ -105,5 +79,10 @@ export class SignalingMessageGateway {
         });
       }
     });
+  }
+
+  async clearInbox(roomId: RoomId, peerId: SignalingPeerId): Promise<void> {
+    const snapshot = await getDocs(this.messagesRef(roomId, peerId));
+    await Promise.all(snapshot.docs.map((document) => deleteDoc(document.ref)));
   }
 }

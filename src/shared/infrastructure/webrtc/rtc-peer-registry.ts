@@ -1,27 +1,9 @@
-// rtc-peer-registry.ts
-
-import type { ActiveRtcConnection } from "./active-rtc-connection";
-import type { RtcPeerStatus } from "./types";
-import type { SignalingPeerId } from "@infrastructure/signaling";
-import { RtcConnectionFactory } from "./rtc-connection-factory";
-
-export interface PeerEntry {
-  factory: RtcConnectionFactory;
-  connection: ActiveRtcConnection | null;
-  status: RtcPeerStatus;
-}
-
-export interface RtcPeer {
-  signalingPeerId: SignalingPeerId;
-  status: RtcPeerStatus;
-}
+import { SignalingPeerId } from "../signaling";
+import type { PeerEntry, RtcPeer, RtcPeerStatus } from "./types";
 
 type RtcPeerHandler = (peer: RtcPeer) => void;
 
-type StatusChangedHandler = (
-  status: RtcPeerStatus,
-  signalingPeerId: SignalingPeerId,
-) => void;
+type StatusChangedHandler = (status: RtcPeerStatus, signalingPeerId: SignalingPeerId) => void;
 
 export class RtcPeerRegistry {
   private readonly peers = new Map<SignalingPeerId, PeerEntry>();
@@ -77,7 +59,7 @@ export class RtcPeerRegistry {
     const entry = this.peers.get(signalingPeerId);
     if (!entry || entry.status === status) return;
     console.log(
-      `[RtcPeerRegistry] Peer=${short(signalingPeerId)} status: ${entry.status} → ${status}`,
+      `[RtcPeerRegistry] Peer=${short(signalingPeerId)} status: ${entry.status} → ${status}`
     );
     entry.status = status;
     for (const handler of this.statusChangedHandlers) {
@@ -113,10 +95,7 @@ export class RtcPeerRegistry {
 
   // ─── Private ─────────────────────────────────────────────────────────────
 
-  private notifyJoined(
-    signalingPeerId: SignalingPeerId,
-    entry: PeerEntry,
-  ): void {
+  private notifyJoined(signalingPeerId: SignalingPeerId, entry: PeerEntry): void {
     for (const handler of this.peerJoinedHandlers) {
       handler({ signalingPeerId, status: entry.status });
     }

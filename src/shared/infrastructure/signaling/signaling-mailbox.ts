@@ -1,10 +1,5 @@
 import type { SignalingMessageGateway } from "./signaling-message-gateway";
-import type {
-  MessageHandler,
-  RoomId,
-  SignalingMessage,
-  SignalingPeerId,
-} from "./types";
+import type { MessageHandler, RoomId, SignalingMessage, SignalingPeerId } from "./types";
 
 export class SignalingMailbox {
   private unsubscribeFromMessages?: () => void;
@@ -12,11 +7,11 @@ export class SignalingMailbox {
   public constructor(
     private readonly gateway: SignalingMessageGateway,
     private readonly roomId: RoomId,
-    private readonly currentPeerId: SignalingPeerId,
+    private readonly currentPeerId: SignalingPeerId
   ) {}
 
   public async send<T>(
-    message: Omit<SignalingMessage<T>, "timestamp" | "fromPeerId" | "id">,
+    message: Omit<SignalingMessage<T>, "timestamp" | "fromPeerId" | "id">
   ): Promise<SignalingMessage> {
     const enhancedMessage = {
       ...message,
@@ -31,7 +26,7 @@ export class SignalingMailbox {
   public startReceivingFor<T>(
     peerId: SignalingPeerId,
     messageHandler: MessageHandler<T>,
-    onMessageReceived?: (message: SignalingMessage<T>) => void,
+    onMessageReceived?: (message: SignalingMessage<T>) => void
   ): void {
     this.stopReceiving();
 
@@ -43,8 +38,8 @@ export class SignalingMailbox {
           peerId,
           messageHandler,
           onMessageReceived,
-          message as SignalingMessage<T>,
-        ),
+          message as SignalingMessage<T>
+        )
     );
   }
 
@@ -57,27 +52,20 @@ export class SignalingMailbox {
     peerId: SignalingPeerId,
     messageHandler: MessageHandler<T>,
     onMessageReceived: ((message: SignalingMessage<T>) => void) | undefined,
-    message: SignalingMessage<T>,
+    message: SignalingMessage<T>
   ): Promise<void> {
     try {
       await messageHandler.handle(message);
       onMessageReceived?.(message);
       await this.gateway.deleteMessage(this.roomId, peerId, message.id);
     } catch (error) {
-      console.warn(
-        `[SignalingMailbox] Failed to handle signaling message "${message.id}".`,
-        error,
-      );
+      console.warn(`[SignalingMailbox] Failed to handle signaling message "${message.id}".`, error);
     }
   }
 
   public async isMessageStillPending(
-    message: Pick<SignalingMessage, "toPeerId" | "id">,
+    message: Pick<SignalingMessage, "toPeerId" | "id">
   ): Promise<boolean> {
-    return this.gateway.messageExists(
-      this.roomId,
-      message.toPeerId,
-      message.id,
-    );
+    return this.gateway.messageExists(this.roomId, message.toPeerId, message.id);
   }
 }

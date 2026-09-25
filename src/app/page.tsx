@@ -1,4 +1,4 @@
-import { WebRtcAutoTest } from "@/presentation/temp/WebRtcAutoTest";
+import { PlayerSessionTest } from "@/shared/presentation/PlayerSessionTest";
 
 interface HomeProps {
   searchParams: Promise<{
@@ -9,5 +9,5 @@ interface HomeProps {
 export default async function Home({ searchParams }: HomeProps) {
   const params = await searchParams;
 
-  return <WebRtcAutoTest />;
+  return <PlayerSessionTest />;
 }

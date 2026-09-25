@@ -1,11 +1,9 @@
 // rtc-peer-link-factory.ts
 
+import { SignalingPeerId, SignalingSession } from "../signaling";
 import { RtcConnectionFactory } from "./rtc-connection-factory";
-import type { PeerEntry, RtcPeerRegistry } from "./rtc-peer-registry";
-import type {
-  SignalingPeerId,
-  SignalingSession,
-} from "@infrastructure/signaling";
+import type { RtcPeerRegistry } from "./rtc-peer-registry";
+import type { PeerEntry } from "./types";
 
 type MessageHandler = (message: string, from: SignalingPeerId) => void;
 type ConnectionDiedHandler = (signalingPeerId: SignalingPeerId) => void;
@@ -17,13 +15,11 @@ export class RtcPeerLinkFactory {
     private readonly onMessage: MessageHandler,
     private readonly onConnectionDied: ConnectionDiedHandler,
     private readonly isHost: () => boolean,
-    private readonly isLeaving: () => boolean,
+    private readonly isLeaving: () => boolean
   ) {}
 
   create(signalingPeerId: SignalingPeerId): PeerEntry {
-    console.log(
-      `[RtcPeerLinkFactory] Creating link for peer=${short(signalingPeerId)}`,
-    );
+    console.log(`[RtcPeerLinkFactory] Creating link for peer=${short(signalingPeerId)}`);
 
     const factory = new RtcConnectionFactory();
     const entry: PeerEntry = {
@@ -34,33 +30,23 @@ export class RtcPeerLinkFactory {
 
     factory.onIceCandidateCreated((candidate) => {
       if (this.isLeaving()) return;
-      console.log(
-        `[RtcPeerLinkFactory] ICE candidate for peer=${short(signalingPeerId)}`,
-      );
+      console.log(`[RtcPeerLinkFactory] ICE candidate for peer=${short(signalingPeerId)}`);
       void this.signalingSession.sendIceCandidate(
         signalingPeerId,
         candidate,
-        this.isHost() ? "remove" : "do-nothing",
+        this.isHost() ? "remove" : "do-nothing"
       );
     });
 
     factory.onAnswerCreated((answer) => {
       if (this.isLeaving()) return;
-      console.log(
-        `[RtcPeerLinkFactory] Answer created for peer=${short(signalingPeerId)}`,
-      );
-      void this.signalingSession.sendAnswer(
-        signalingPeerId,
-        answer.sdp!,
-        "do-nothing",
-      );
+      console.log(`[RtcPeerLinkFactory] Answer created for peer=${short(signalingPeerId)}`);
+      void this.signalingSession.sendAnswer(signalingPeerId, answer.sdp!, "do-nothing");
     });
 
     factory.onConnected((connection) => {
       if (this.isLeaving()) return;
-      console.log(
-        `[RtcPeerLinkFactory] Connected to peer=${short(signalingPeerId)}`,
-      );
+      console.log(`[RtcPeerLinkFactory] Connected to peer=${short(signalingPeerId)}`);
 
       entry.connection = connection;
       this.registry.setStatus(signalingPeerId, "active");
@@ -71,7 +57,7 @@ export class RtcPeerLinkFactory {
 
       connection.onStateChange((state) => {
         console.log(
-          `[RtcPeerLinkFactory] Connection state changed peer=${short(signalingPeerId)} state=${state}`,
+          `[RtcPeerLinkFactory] Connection state changed peer=${short(signalingPeerId)} state=${state}`
         );
         if (state === "disconnected" || state === "failed") {
           this.onConnectionDied(signalingPeerId);
@@ -82,23 +68,16 @@ export class RtcPeerLinkFactory {
     return entry;
   }
 
-  async initiateOffer(
-    signalingPeerId: SignalingPeerId,
-    entry: PeerEntry,
-  ): Promise<void> {
-    console.log(
-      `[RtcPeerLinkFactory] Initiating offer to peer=${short(signalingPeerId)}`,
-    );
+  async initiateOffer(signalingPeerId: SignalingPeerId, entry: PeerEntry): Promise<void> {
+    console.log(`[RtcPeerLinkFactory] Initiating offer to peer=${short(signalingPeerId)}`);
 
     entry.factory.onOfferCreated((offer) => {
       if (this.isLeaving()) return;
-      console.log(
-        `[RtcPeerLinkFactory] Offer created for peer=${short(signalingPeerId)}`,
-      );
+      console.log(`[RtcPeerLinkFactory] Offer created for peer=${short(signalingPeerId)}`);
       void this.signalingSession.sendOffer(
         signalingPeerId,
         offer.sdp!,
-        this.isHost() ? "remove" : "do-nothing",
+        this.isHost() ? "remove" : "do-nothing"
       );
     });
 

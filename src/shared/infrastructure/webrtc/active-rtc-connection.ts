@@ -6,22 +6,18 @@ export class ActiveRtcConnection {
   readonly id: string = crypto.randomUUID();
 
   private state: ActiveRtcConnectionState = "connected";
-  private readonly stateHandlers = new Set<
-    (state: ActiveRtcConnectionState) => void
-  >();
+  private readonly stateHandlers = new Set<(state: ActiveRtcConnectionState) => void>();
   private readonly messageHandlers = new Set<(message: string) => void>();
 
   constructor(
     private readonly connection: RTCPeerConnection,
-    private readonly dataChannel: RTCDataChannel,
+    private readonly dataChannel: RTCDataChannel
   ) {
     console.log(`[ActiveRtcConnection][${this.id}] Created`);
 
     this.connection.onconnectionstatechange = () => {
       const native = this.connection.connectionState;
-      console.log(
-        `[ActiveRtcConnection][${this.id}] Connection state changed: ${native}`,
-      );
+      console.log(`[ActiveRtcConnection][${this.id}] Connection state changed: ${native}`);
 
       if (native === "failed") {
         this.setState("failed");
@@ -42,10 +38,7 @@ export class ActiveRtcConnection {
     };
 
     this.dataChannel.onerror = (event) => {
-      console.warn(
-        `[ActiveRtcConnection][${this.id}] Data channel error`,
-        event,
-      );
+      console.warn(`[ActiveRtcConnection][${this.id}] Data channel error`, event);
     };
   }
 
@@ -55,9 +48,7 @@ export class ActiveRtcConnection {
     return this.state;
   }
 
-  onStateChange(
-    handler: (state: ActiveRtcConnectionState) => void,
-  ): () => void {
+  onStateChange(handler: (state: ActiveRtcConnectionState) => void): () => void {
     this.stateHandlers.add(handler);
     return () => this.stateHandlers.delete(handler);
   }
@@ -66,13 +57,11 @@ export class ActiveRtcConnection {
 
   send(message: string): void {
     if (this.state !== "connected") {
-      throw new Error(
-        `[ActiveRtcConnection][${this.id}] Cannot send — state is '${this.state}'`,
-      );
+      throw new Error(`[ActiveRtcConnection][${this.id}] Cannot send — state is '${this.state}'`);
     }
     if (this.dataChannel.readyState !== "open") {
       throw new Error(
-        `[ActiveRtcConnection][${this.id}] Cannot send — data channel is '${this.dataChannel.readyState}'`,
+        `[ActiveRtcConnection][${this.id}] Cannot send — data channel is '${this.dataChannel.readyState}'`
       );
     }
     this.dataChannel.send(message);
@@ -96,9 +85,7 @@ export class ActiveRtcConnection {
 
   private setState(state: ActiveRtcConnectionState): void {
     if (this.state === state) return;
-    console.log(
-      `[ActiveRtcConnection][${this.id}] State: ${this.state} → ${state}`,
-    );
+    console.log(`[ActiveRtcConnection][${this.id}] State: ${this.state} → ${state}`);
     this.state = state;
     for (const handler of this.stateHandlers) {
       handler(state);

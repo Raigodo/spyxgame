@@ -15,18 +15,14 @@ export class PendingSignalAckTracker {
 
   public constructor(
     private readonly mailbox: SignalingMailbox,
-    private readonly onTimedOut: (peerId: SignalingPeerId) => void,
+    private readonly onTimedOut: (peerId: SignalingPeerId) => void
   ) {}
 
   // Tracks a newly-sent message for `peerId`, resetting any existing
   // countdown. Only the most recently sent message per peer is checked when
   // the timer fires — always reads the current entry from `pending` at
   // fire-time, so a reused countdown never checks a stale message id.
-  track(
-    peerId: SignalingPeerId,
-    messageId: MessageId,
-    strategy: AckTimeoutStrategy,
-  ): void {
+  track(peerId: SignalingPeerId, messageId: MessageId, strategy: AckTimeoutStrategy): void {
     this.pending.set(peerId, { messageId, strategy });
 
     let countdown = this.countdowns.get(peerId);

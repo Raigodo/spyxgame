@@ -46,9 +46,7 @@ export class RtcConnectionFactory {
     this.answerCreatedHandler = handler;
   }
 
-  onIceCandidateCreated(
-    handler: (candidate: RTCIceCandidateInit) => void,
-  ): void {
+  onIceCandidateCreated(handler: (candidate: RTCIceCandidateInit) => void): void {
     this.iceCandidateCreatedHandler = handler;
   }
 
@@ -101,9 +99,7 @@ export class RtcConnectionFactory {
   async applyIceCandidate(candidate: RTCIceCandidateInit): Promise<void> {
     this.assertNotClosed();
     if (!this.remoteDescriptionSet) {
-      console.log(
-        "[RtcConnectionFactory] Queuing ICE candidate — remote description not set yet",
-      );
+      console.log("[RtcConnectionFactory] Queuing ICE candidate — remote description not set yet");
       this.queuedCandidates.push(candidate); // ← add
       return;
     }
@@ -114,7 +110,7 @@ export class RtcConnectionFactory {
   private async drainQueuedCandidates(): Promise<void> {
     if (this.queuedCandidates.length === 0) return;
     console.log(
-      `[RtcConnectionFactory] Draining ${this.queuedCandidates.length} queued ICE candidates`,
+      `[RtcConnectionFactory] Draining ${this.queuedCandidates.length} queued ICE candidates`
     );
     const candidates = this.queuedCandidates.splice(0);
     for (const candidate of candidates) {
@@ -136,9 +132,7 @@ export class RtcConnectionFactory {
 
   private attachDataChannelHandlers(channel: RTCDataChannel): void {
     channel.onopen = () => {
-      console.log(
-        "[RtcConnectionFactory] Data channel open — handing off ActiveRtcConnection",
-      );
+      console.log("[RtcConnectionFactory] Data channel open — handing off ActiveRtcConnection");
       const active = new ActiveRtcConnection(this.connection, channel);
       this.connectedHandler?.(active);
     };

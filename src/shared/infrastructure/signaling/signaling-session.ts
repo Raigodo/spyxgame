@@ -39,14 +39,14 @@ export class SignalingSession {
   public constructor(
     private readonly membershipGateway: RoomMembershipGateway,
     private readonly messageGateway: SignalingMessageGateway,
-    private readonly electionGateway: HostElectionGateway,
+    private readonly electionGateway: HostElectionGateway
   ) {}
 
   // ─── Public API ───────────────────────────────────────────────────────────
 
   public async joinRoom(
     roomId: RoomId,
-    peerId: SignalingPeerId = crypto.randomUUID(),
+    peerId: SignalingPeerId = crypto.randomUUID()
   ): Promise<SignalingPeerId> {
     if (this.localPeerId) {
       throw new Error("Already joined a room.");
@@ -64,12 +64,9 @@ export class SignalingSession {
     await this.membershipGateway.addPeer(roomId, peerId, { joinedAt });
 
     this.mailbox = new SignalingMailbox(this.messageGateway, roomId, peerId);
-    this.ackTracker = new PendingSignalAckTracker(
-      this.mailbox,
-      (deadPeerId) => {
-        void this.membershipGateway.removePeer(roomId, deadPeerId);
-      },
-    );
+    this.ackTracker = new PendingSignalAckTracker(this.mailbox, (deadPeerId) => {
+      void this.membershipGateway.removePeer(roomId, deadPeerId);
+    });
 
     this.mailbox.startReceivingFor(
       peerId,
@@ -81,7 +78,7 @@ export class SignalingSession {
       (message) => {
         this.ackTracker?.acknowledge(message.fromPeerId);
         this.handleSignalReceived(message as SignalingMessage<WebRtcSignal>);
-      },
+      }
     );
 
     this.startTrackingPeers();
@@ -89,8 +86,9 @@ export class SignalingSession {
     this.hostElectionService = new HostElectionService(
       this.membershipGateway,
       this.electionGateway,
+      this.messageGateway,
       roomId,
-      peerId,
+      peerId
     );
     this.hostElectionService.start();
 
@@ -110,11 +108,13 @@ export class SignalingSession {
     this.mailbox = undefined;
     this.ackTracker = undefined;
 
+    await this.messageGateway.clearInbox(roomId, localPeerId).catch((error) => {
+      console.warn("[SignalingSession] Failed to clear own inbox on leave", error);
+    });
+
     const currentHost = await this.electionGateway.getHost(roomId);
     if (currentHost?.signalingPeerId === localPeerId) {
-      console.log(
-        "[SignalingSession] Leaving as host — clearing host document",
-      );
+      console.log("[SignalingSession] Leaving as host — clearing host document");
       await this.electionGateway.clearHost(roomId);
     }
 
@@ -161,7 +161,7 @@ export class SignalingSession {
   public async sendOffer(
     peerId: SignalingPeerId,
     sdp: string,
-    onAckTimeout: "remove" | "do-nothing",
+    onAckTimeout: "remove" | "do-nothing"
   ): Promise<void> {
     await this.sendSignal(peerId, { type: "offer", sdp }, onAckTimeout);
   }
@@ -169,7 +169,7 @@ export class SignalingSession {
   public async sendAnswer(
     peerId: SignalingPeerId,
     sdp: string,
-    onAckTimeout: "remove" | "do-nothing",
+    onAckTimeout: "remove" | "do-nothing"
   ): Promise<void> {
     // peer may not be in tracker yet when replying to an offer
     await this.sendSignal(peerId, { type: "answer", sdp }, onAckTimeout, true);
@@ -178,15 +178,10 @@ export class SignalingSession {
   public async sendIceCandidate(
     peerId: SignalingPeerId,
     candidate: RTCIceCandidateInit,
-    onAckTimeout: "remove" | "do-nothing",
+    onAckTimeout: "remove" | "do-nothing"
   ): Promise<void> {
     // same reason — ICE flows before tracker catches up
-    await this.sendSignal(
-      peerId,
-      { type: "ice-candidate", candidate },
-      onAckTimeout,
-      true,
-    );
+    await this.sendSignal(peerId, { type: "ice-candidate", candidate }, onAckTimeout, true);
   }
 
   // ─── Private ──────────────────────────────────────────────────────────────
@@ -195,7 +190,7 @@ export class SignalingSession {
     peerId: SignalingPeerId,
     signal: WebRtcSignal,
     onAckTimeout: "remove" | "do-nothing",
-    skipTrackerCheck = false,
+    skipTrackerCheck = false
   ): Promise<void> {
     if (!this.localPeerId) {
       throw new Error("Cannot send a signal before joining a room.");
@@ -220,9 +215,8 @@ export class SignalingSession {
   private startTrackingPeers(): void {
     if (!this.localRoomId) return;
 
-    this.unsubscribeFromPeers = this.membershipGateway.subscribeToPeers(
-      this.localRoomId,
-      (peers) => this.reconcilePeers(peers),
+    this.unsubscribeFromPeers = this.membershipGateway.subscribeToPeers(this.localRoomId, (peers) =>
+      this.reconcilePeers(peers)
     );
   }
 

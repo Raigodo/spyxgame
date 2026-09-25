@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { WebRtcService } from "@infrastructure/webrtc/web-rtc-service";
+import { WebRtcService } from "@/shared/infrastructure/webrtc/web-rtc-service";
 
 const ROOM_ID = "test-room2";
 const TEST_MESSAGE = "hello!";
@@ -16,7 +16,7 @@ interface PeerRow {
   status: string;
 }
 
-export function WebRtcAutoTest() {
+export function WebRtcTest() {
   const serviceRef = useRef<WebRtcService | null>(null);
 
   const [joined, setJoined] = useState(false);
@@ -49,17 +49,13 @@ export function WebRtcAutoTest() {
     serviceRef.current = service;
 
     service.onPeerJoined((peer) => {
-      addLog(
-        `RTC peer joined: ${short(peer.signalingPeerId)} status=${peer.status}`,
-      );
+      addLog(`RTC peer joined: ${short(peer.signalingPeerId)} status=${peer.status}`);
 
       refreshPeers();
     });
 
     service.onPeerLeft((peer) => {
-      addLog(
-        `RTC peer left: ${short(peer.signalingPeerId)} status=${peer.status}`,
-      );
+      addLog(`RTC peer left: ${short(peer.signalingPeerId)} status=${peer.status}`);
 
       refreshPeers();
     });
@@ -172,9 +168,7 @@ export function WebRtcAutoTest() {
       {joined && (
         <div className="space-y-2">
           <div className="flex justify-between items-center">
-            <p className="font-medium text-gray-700 text-sm">
-              RTC peers ({peers.length})
-            </p>
+            <p className="font-medium text-gray-700 text-sm">RTC peers ({peers.length})</p>
 
             {hasActivePeer && (
               <button
@@ -187,9 +181,7 @@ export function WebRtcAutoTest() {
           </div>
 
           {peers.length === 0 ? (
-            <p className="text-gray-400 text-sm">
-              No peers yet — open another tab and join.
-            </p>
+            <p className="text-gray-400 text-sm">No peers yet — open another tab and join.</p>
           ) : (
             <div className="border border-gray-200 rounded-lg divide-y divide-gray-100 overflow-hidden">
               {peers.map((peer) => (
@@ -236,15 +228,11 @@ export function WebRtcAutoTest() {
         </div>
 
         <div className="space-y-1 bg-gray-50 p-3 border border-gray-200 rounded-lg h-64 overflow-y-auto">
-          {log.length === 0 && (
-            <p className="text-gray-400 text-sm">Nothing yet…</p>
-          )}
+          {log.length === 0 && <p className="text-gray-400 text-sm">Nothing yet…</p>}
 
           {log.map((entry, index) => (
             <div key={index} className="flex gap-2 text-xs">
-              <span className="tabular-nums text-gray-400 shrink-0">
-                {entry.timestamp}
-              </span>
+              <span className="tabular-nums text-gray-400 shrink-0">{entry.timestamp}</span>
 
               <span className="text-gray-700">{entry.text}</span>
             </div>
@@ -263,13 +251,7 @@ function StatusDot({ status }: { status: string }) {
     dead: "bg-red-400",
   };
 
-  return (
-    <span
-      className={`w-2 h-2 rounded-full shrink-0 ${
-        colors[status] ?? "bg-gray-300"
-      }`}
-    />
-  );
+  return <span className={`w-2 h-2 rounded-full shrink-0 ${colors[status] ?? "bg-gray-300"}`} />;
 }
 
 function short(id: string): string {

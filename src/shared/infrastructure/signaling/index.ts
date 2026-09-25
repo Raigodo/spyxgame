@@ -1,4 +1,4 @@
-export * from "./types";
+export type * from "./types";
 export { SignalingSession } from "./signaling-session";
 export { HostElectionService } from "./host-election-service";
 export type { HostDocument } from "./host-election-gateway";
@@ -13,6 +13,6 @@ export function createSignalingSession(): SignalingSession {
   return new SignalingSession(
     new RoomMembershipGateway(firestoreClient),
     new SignalingMessageGateway(firestoreClient),
-    new HostElectionGateway(firestoreClient),
+    new HostElectionGateway(firestoreClient)
   );
 }

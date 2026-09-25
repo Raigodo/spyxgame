@@ -1,9 +1,6 @@
 // rtc-reconnection-manager.ts
 
-import type {
-  HostElectionService,
-  SignalingPeerId,
-} from "@infrastructure/signaling";
+import type { HostElectionService, SignalingPeerId } from "@/shared/infrastructure/signaling";
 import type { RtcPeerLinkFactory } from "./rtc-peer-link-factory";
 import type { RtcPeerRegistry } from "./rtc-peer-registry";
 
@@ -11,10 +8,7 @@ const RECONNECT_TIMEOUT_MS = 5_000;
 const OFFER_TIMEOUT_MS = 5_000;
 
 export class RtcReconnectionManager {
-  private readonly offerWatches = new Map<
-    SignalingPeerId,
-    ReturnType<typeof setTimeout>
-  >();
+  private readonly offerWatches = new Map<SignalingPeerId, ReturnType<typeof setTimeout>>();
   private unsubscribeFromRegistry?: () => void;
 
   constructor(
@@ -22,26 +16,22 @@ export class RtcReconnectionManager {
     private readonly linkFactory: RtcPeerLinkFactory,
     private readonly getHostElection: () => HostElectionService,
     private readonly isHost: () => boolean,
-    private readonly isLeaving: () => boolean,
+    private readonly isLeaving: () => boolean
   ) {}
 
   start(): void {
-    this.unsubscribeFromRegistry = this.registry.onAnyStatusChanged(
-      (status, signalingPeerId) => {
-        if (status !== "active") return;
+    this.unsubscribeFromRegistry = this.registry.onAnyStatusChanged((status, signalingPeerId) => {
+      if (status !== "active") return;
 
-        this.stopWatchingForOffer(signalingPeerId);
+      this.stopWatchingForOffer(signalingPeerId);
 
-        // A healthy connection to the specific peer we were worried about
-        // means it's not actually dead — cancel that election. A different,
-        // unrelated peer becoming active shouldn't touch it.
-        if (
-          this.getHostElection().getSuspectedDeadHostId() === signalingPeerId
-        ) {
-          this.getHostElection().cancelPendingElection();
-        }
-      },
-    );
+      // A healthy connection to the specific peer we were worried about
+      // means it's not actually dead — cancel that election. A different,
+      // unrelated peer becoming active shouldn't touch it.
+      if (this.getHostElection().getSuspectedDeadHostId() === signalingPeerId) {
+        this.getHostElection().cancelPendingElection();
+      }
+    });
   }
 
   stop(): void {
@@ -55,7 +45,7 @@ export class RtcReconnectionManager {
   async handleConnectionDied(signalingPeerId: SignalingPeerId): Promise<void> {
     if (this.isLeaving()) {
       console.log(
-        `[RtcReconnectionManager] Ignoring connection death during leave for peer=${short(signalingPeerId)}`,
+        `[RtcReconnectionManager] Ignoring connection death during leave for peer=${short(signalingPeerId)}`
       );
       return;
     }
@@ -63,9 +53,7 @@ export class RtcReconnectionManager {
     const entry = this.registry.get(signalingPeerId);
     if (!entry) return;
 
-    console.warn(
-      `[RtcReconnectionManager] Connection died for peer=${short(signalingPeerId)}`,
-    );
+    console.warn(`[RtcReconnectionManager] Connection died for peer=${short(signalingPeerId)}`);
     this.registry.disposeEntry(entry);
 
     if (this.isHost()) {
@@ -84,9 +72,7 @@ export class RtcReconnectionManager {
   watchForOffer(hostPeerId: SignalingPeerId): void {
     this.stopWatchingForOffer(hostPeerId);
 
-    console.log(
-      `[RtcReconnectionManager] Watching for offer from host=${short(hostPeerId)}`,
-    );
+    console.log(`[RtcReconnectionManager] Watching for offer from host=${short(hostPeerId)}`);
 
     const timeout = setTimeout(() => {
       this.offerWatches.delete(hostPeerId);
@@ -97,7 +83,7 @@ export class RtcReconnectionManager {
       if (entry?.status === "active") return;
 
       console.warn(
-        `[RtcReconnectionManager] No offer from host=${short(hostPeerId)} within timeout — suspecting dead`,
+        `[RtcReconnectionManager] No offer from host=${short(hostPeerId)} within timeout — suspecting dead`
       );
       this.suspectHostDead(hostPeerId);
     }, OFFER_TIMEOUT_MS);
@@ -123,20 +109,14 @@ export class RtcReconnectionManager {
   // ─── Shared ─────────────────────────────────────────────────────────────
 
   suspectHostDead(deadHostPeerId: SignalingPeerId): void {
-    console.log(
-      `[RtcReconnectionManager] Suspecting host=${short(deadHostPeerId)} is dead`,
-    );
+    console.log(`[RtcReconnectionManager] Suspecting host=${short(deadHostPeerId)} is dead`);
     this.getHostElection().reportSuspectedDeath(deadHostPeerId);
   }
 
   // ─── Private ────────────────────────────────────────────────────────────
 
-  private async reconnectAsHost(
-    signalingPeerId: SignalingPeerId,
-  ): Promise<void> {
-    console.log(
-      `[RtcReconnectionManager] Reconnecting as host to peer=${short(signalingPeerId)}`,
-    );
+  private async reconnectAsHost(signalingPeerId: SignalingPeerId): Promise<void> {
+    console.log(`[RtcReconnectionManager] Reconnecting as host to peer=${short(signalingPeerId)}`);
 
     const newEntry = this.linkFactory.create(signalingPeerId);
     newEntry.status = "reconnecting";
@@ -148,7 +128,7 @@ export class RtcReconnectionManager {
 
   private reconnectAsGuest(signalingPeerId: SignalingPeerId): void {
     console.log(
-      `[RtcReconnectionManager] Reconnecting as guest — waiting for new offer from peer=${short(signalingPeerId)}`,
+      `[RtcReconnectionManager] Reconnecting as guest — waiting for new offer from peer=${short(signalingPeerId)}`
     );
 
     const reconnectingEntry = this.linkFactory.create(signalingPeerId);
@@ -165,7 +145,7 @@ export class RtcReconnectionManager {
       if (!current || current.status !== "reconnecting") return;
 
       console.warn(
-        `[RtcReconnectionManager] No offer received from peer=${short(signalingPeerId)} — removing entry`,
+        `[RtcReconnectionManager] No offer received from peer=${short(signalingPeerId)} — removing entry`
       );
       this.registry.disposeEntry(current);
       this.registry.remove(signalingPeerId);

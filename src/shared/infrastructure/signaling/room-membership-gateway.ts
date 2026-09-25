@@ -32,11 +32,7 @@ export class RoomMembershipGateway {
   }
 
   async createRoom(roomId: RoomId): Promise<void> {
-    await setDoc(
-      this.roomRef(roomId),
-      { createdAt: serverTimestamp() },
-      { merge: false },
-    );
+    await setDoc(this.roomRef(roomId), { createdAt: serverTimestamp() }, { merge: false });
   }
 
   async roomExists(roomId: RoomId): Promise<boolean> {
@@ -47,7 +43,7 @@ export class RoomMembershipGateway {
   async addPeer(
     roomId: RoomId,
     peerId: SignalingPeerId,
-    peer: Omit<SignalingPeer, "peerId">,
+    peer: Omit<SignalingPeer, "peerId">
   ): Promise<void> {
     await setDoc(this.peerRef(roomId, peerId), { joinedAt: peer.joinedAt });
   }
@@ -75,10 +71,7 @@ export class RoomMembershipGateway {
     });
   }
 
-  subscribeToPeers(
-    roomId: RoomId,
-    onChange: (peers: SignalingPeer[]) => void,
-  ): Unsubscribe {
+  subscribeToPeers(roomId: RoomId, onChange: (peers: SignalingPeer[]) => void): Unsubscribe {
     const peersQuery = query(this.peersRef(roomId), orderBy("joinedAt", "asc"));
 
     return onSnapshot(
@@ -94,11 +87,8 @@ export class RoomMembershipGateway {
         onChange(peers);
       },
       (error) => {
-        console.warn(
-          "[RoomMembershipGateway] Failed to subscribe to peers:",
-          error,
-        );
-      },
+        console.warn("[RoomMembershipGateway] Failed to subscribe to peers:", error);
+      }
     );
   }
 }
