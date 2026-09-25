@@ -1,0 +1,7 @@
+# 1. Run lint-staged on modified files
+
+npx pnpm run format
+
+# 2. Run your global check script using pnpm or npm
+
+npx pnpm run check
