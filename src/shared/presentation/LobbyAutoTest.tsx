@@ -270,7 +270,8 @@ export function LobbyAutoTest() {
                     <ul>
                       {playersByTeam[teamId]?.map((p) => (
                         <li key={p.peerId}>
-                          {p.nickname} ({short(p.peerId)}) — ready={String(p.ready)}
+                          {p.nickname} ({short(p.peerId)}) — ready=
+                          {String(p.ready)}
                         </li>
                       ))}
                     </ul>
@@ -281,7 +282,8 @@ export function LobbyAutoTest() {
                   <ul>
                     {unassigned?.map((p) => (
                       <li key={p.peerId}>
-                        {p.nickname} ({short(p.peerId)}) — ready={String(p.ready)}
+                        {p.nickname} ({short(p.peerId)}) — ready=
+                        {String(p.ready)}
                       </li>
                     ))}
                   </ul>
