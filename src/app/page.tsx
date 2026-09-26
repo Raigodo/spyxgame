@@ -1,5 +1,3 @@
-import { PlayerSessionTest } from "@/shared/presentation/PlayerSessionTest";
-
 interface HomeProps {
   searchParams: Promise<{
     isHost?: string;
@@ -9,5 +7,5 @@ interface HomeProps {
 export default async function Home({ searchParams }: HomeProps) {
   const params = await searchParams;
 
-  return <PlayerSessionTest />;
+  return <>Hello</>;
 }
