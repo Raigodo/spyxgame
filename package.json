@@ -11,6 +11,12 @@
     "format:check": "prettier --check .",
     "prepare": "husky"
   },
+  "lint-staged": {
+    "*.{js,jsx,ts,tsx,json,css,md}": [
+      "prettier --write",
+      "eslint --quiet"
+    ]
+  },
   "dependencies": {
     "firebase": "^12.19.0",
     "next": "16.3.5",
