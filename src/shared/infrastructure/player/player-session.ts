@@ -3,6 +3,7 @@ import { PlayerDirectory } from "./player-directory";
 import { WebRtcService } from "../webrtc/web-rtc-service";
 import { RoomId, SignalingPeerId } from "../signaling";
 import type { LocalProfileInput, PlayerProfile } from "./types";
+import { RtcPeer, RtcPeerStatus } from "../webrtc/types";
 
 type Envelope =
   | { kind: "profile"; profile: PlayerProfile }
@@ -164,6 +165,14 @@ export class PlayerSession {
   onMessage(handler: AppMessageHandler): () => void {
     this.appMessageHandlers.add(handler);
     return () => this.appMessageHandlers.delete(handler);
+  }
+
+  onPeerConnectionStatusChanged(handler: (peer: RtcPeer) => void): () => void {
+    return this.rtc.onPeerStatusChanged(handler);
+  }
+
+  getPeerConnectionStatus(peerId: SignalingPeerId): RtcPeerStatus | undefined {
+    return this.rtc.getPeers().find((p) => p.signalingPeerId === peerId)?.status;
   }
 
   isHost(): boolean {

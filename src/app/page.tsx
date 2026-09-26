@@ -1,4 +1,4 @@
-import { PlayerSessionTest } from "@/shared/presentation/PlayerSessionTest";
+import LobbyTestHarness from "@/shared/presentation/LobbyTest";
 
 interface HomeProps {
   searchParams: Promise<{
@@ -9,5 +9,5 @@ interface HomeProps {
 export default async function Home({ searchParams }: HomeProps) {
   const params = await searchParams;
 
-  return <PlayerSessionTest />;
+  return <LobbyTestHarness />;
 }

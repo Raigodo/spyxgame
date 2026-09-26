@@ -3,11 +3,15 @@ import type { SignalingPeerId } from "@/shared/infrastructure/signaling";
 import { FreeForAllLobbyService } from "./free-for-all-lobby-service";
 import { LobbyRoster } from "./lobby-roster";
 import { TeamLobbyService } from "./team-lobby-service";
-import type { LobbyMode } from "./types";
+import type { Lobby, LobbyConfig, LobbyMode, LobbyPlayer } from "./types";
 
-export type Lobby = FreeForAllLobbyService | TeamLobbyService;
-
-export type LobbyConfig = { mode: "free-for-all" } | { mode: "teams"; teamIds: string[] };
+export interface LobbySnapshot {
+  mode: LobbyMode;
+  teamIds?: string[];
+  hostPeerId?: SignalingPeerId;
+  localPeerId?: SignalingPeerId;
+  players: LobbyPlayer[];
+}
 
 type LobbyControlMessage =
   | { __lobbyControl: true; mode: "free-for-all" }
@@ -72,6 +76,20 @@ export class LobbyController {
 
   switchToTeams(teamIds: string[]): void {
     this.applyModeSwitch({ mode: "teams", teamIds }, true);
+  }
+
+  // Passive export — no broadcast, no game-lifecycle opinion. The app reads
+  // this, disposes the lobby, and constructs whatever GameService it wants
+  // with the same PlayerSession, which is still joined and untouched.
+  getSnapshot(): LobbySnapshot {
+    const config = this.currentConfig();
+    return {
+      mode: config.mode,
+      teamIds: config.mode === "teams" ? config.teamIds : undefined,
+      hostPeerId: this.session.getHostPeerId(),
+      localPeerId: this.session.getLocalPlayer()?.peerId,
+      players: this.lobby.getPlayers(),
+    };
   }
 
   // ─── Private ──────────────────────────────────────────────────────────────

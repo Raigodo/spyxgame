@@ -14,5 +14,6 @@ export interface LocalProfileInput {
 
 export interface StoredIdentity {
   peerId: string;
+  playerId: string;
   nickname: string;
 }
