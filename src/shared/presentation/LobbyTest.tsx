@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { loadLocalProfile, saveLocalProfile, PlayerSession } from "@/shared/infrastructure/player";
 import { WebRtcService } from "@/shared/infrastructure/webrtc";
+import { PlayerPresenceService } from "@/shared/application/presence";
 import {
   buildLocalProfileInput,
   LobbyController,
@@ -47,8 +48,16 @@ export default function LobbyTestHarness() {
   // read/written straight in the render body, which React explicitly
   // disallows: refs must only be read or written in effects/handlers, not
   // during render). Storing them in useState instead sidesteps the problem
-  // entirely, since state is only ever set from handlers/effects too. ───────
+  // entirely, since state is only ever set from handlers/effects too.
+  //
+  // Three separate slots, three separate lifetimes: `session` lives for the
+  // whole room membership; `presence` is constructed once right after
+  // joining and *also* lives for the whole room membership — it's the
+  // reconnect/duplicate-session service shared between lobby and whatever
+  // comes after it; `controller` lives only for the lobby phase and gets
+  // discarded by startGame() while the other two keep running untouched. ───
   const [session, setSession] = useState<PlayerSession | null>(null);
+  const [presence, setPresence] = useState<PlayerPresenceService | null>(null);
   const [controller, setController] = useState<LobbyController | null>(null);
 
   // ─── Derived / synced UI state ─────────────────────────────────────────────
@@ -85,24 +94,30 @@ export default function LobbyTestHarness() {
   }, [playerId, controller]);
 
   // This ref exists only so the unmount-cleanup effect can reach the *latest*
-  // session/controller without re-running (and re-subscribing) on every
-  // render. It is written exclusively inside a useEffect (i.e. after commit)
-  // and read exclusively inside a cleanup callback that fires on unmount —
-  // never read or written during the render itself. That's the sanctioned
-  // use of a ref for "give me the current value later"; the anti-pattern
-  // this avoids is reading/writing `ref.current` synchronously in the
-  // component body to lazily build a singleton.
-  const liveRef = useRef<{ session: PlayerSession | null; controller: LobbyController | null }>({
+  // session/presence/controller without re-running (and re-subscribing) on
+  // every render. It is written exclusively inside a useEffect (i.e. after
+  // commit) and read exclusively inside a cleanup callback that fires on
+  // unmount — never read or written during the render itself. That's the
+  // sanctioned use of a ref for "give me the current value later"; the
+  // anti-pattern this avoids is reading/writing `ref.current` synchronously
+  // in the component body to lazily build a singleton.
+  const liveRef = useRef<{
+    session: PlayerSession | null;
+    presence: PlayerPresenceService | null;
+    controller: LobbyController | null;
+  }>({
     session: null,
+    presence: null,
     controller: null,
   });
   useEffect(() => {
-    liveRef.current = { session, controller };
-  }, [session, controller]);
+    liveRef.current = { session, presence, controller };
+  }, [session, presence, controller]);
 
   useEffect(() => {
     return () => {
       liveRef.current.controller?.dispose();
+      liveRef.current.presence?.dispose();
       void liveRef.current.session?.leave();
     };
   }, []);
@@ -134,10 +149,6 @@ export default function LobbyTestHarness() {
       log(`${p.nickname} left [${short(p.peerId)}]`);
       refresh();
     });
-    const unsubSuperseded = controller.onSessionSuperseded(() => {
-      setSessionSuperseded(true);
-      log("Superseded: a newer connection for this playerId took over.");
-    });
 
     return () => {
       unsubMode();
@@ -145,9 +156,25 @@ export default function LobbyTestHarness() {
       unsubRejoined();
       unsubUpdated();
       unsubLeft();
-      unsubSuperseded();
     };
   }, [controller, log]);
+
+  // ─── Wire up presence events once per join, independent of the lobby's own
+  // lifecycle. This is deliberately its own effect, keyed on `presence`
+  // rather than `controller` — presence outlives the lobby (startGame()
+  // disposes the controller but never presence), so a duplicate-session
+  // rejection needs to keep being reported to this tab even after the game
+  // has "started" in this harness. ────────────────────────────────────────────
+  useEffect(() => {
+    if (!presence) return;
+
+    const unsubSuperseded = presence.onSessionSuperseded(() => {
+      setSessionSuperseded(true);
+      log("Superseded: a newer connection for this playerId took over.");
+    });
+
+    return unsubSuperseded;
+  }, [presence, log]);
 
   // ─── Poll host role/id. PlayerSession has no public onHostChanged, so this
   // is the simplest way to keep that bit of the UI honest for manual testing.
@@ -183,10 +210,16 @@ export default function LobbyTestHarness() {
       // buildLocalProfileInput) is durable; reusing a persisted peerId is
       // exactly what caused two tabs to corrupt each other's connection.
       await newSession.join(trimmedRoom, buildLocalProfileInput(finalPlayerId, nickname));
-      const newController = new LobbyController(newSession);
+
+      // Constructed once, right after join, and handed to the lobby — this
+      // is the instance a GameController would also receive once
+      // startGame() fires. The lobby never constructs its own.
+      const newPresence = new PlayerPresenceService(newSession);
+      const newController = new LobbyController(newSession, newPresence);
 
       setPlayerId(finalPlayerId);
       setSession(newSession);
+      setPresence(newPresence);
       setController(newController);
       log(`Joined room "${trimmedRoom}" as ${nickname} [playerId=${short(finalPlayerId)}]`);
     } catch (error) {
@@ -199,8 +232,10 @@ export default function LobbyTestHarness() {
   async function handleLeave() {
     if (!session) return;
     controller?.dispose();
+    presence?.dispose();
     await session.leave();
     setController(null);
+    setPresence(null);
     setSession(null);
     setPlayers([]);
     setSnapshot(null);
@@ -265,8 +300,8 @@ export default function LobbyTestHarness() {
     if (!controller) return;
     const result = controller.startGame();
     setGameSnapshot(JSON.stringify(result, null, 2));
-    setController(null); // lobby wiring is gone — session/connections stay alive
-    log("Game started — lobby wiring disposed, connection kept alive for reuse");
+    setController(null); // lobby wiring is gone — presence, session, and connections stay alive
+    log("Game started — lobby wiring disposed, presence & connection kept alive for reuse");
   }
 
   async function handleCopyJoinLink() {

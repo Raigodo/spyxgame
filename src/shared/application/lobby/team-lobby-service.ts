@@ -1,11 +1,11 @@
-import type { LobbyRoster } from "./lobby-roster";
+import type { LobbyPlayerView } from "./lobby-player-view";
 import type { LobbyPlayer } from "./types";
 
 export class TeamLobbyService {
   readonly mode = "teams" as const;
 
   constructor(
-    private readonly roster: LobbyRoster,
+    private readonly players: LobbyPlayerView,
     private readonly teamIds: readonly string[]
   ) {
     if (teamIds.length < 2) {
@@ -18,11 +18,11 @@ export class TeamLobbyService {
   }
 
   getLocalPlayer(): LobbyPlayer | undefined {
-    return this.roster.getLocalPlayer();
+    return this.players.getLocalPlayer();
   }
 
   getPlayers(): LobbyPlayer[] {
-    return this.roster.getPlayers();
+    return this.players.getPlayers();
   }
 
   getPlayersByTeam(): Record<string, LobbyPlayer[]> {
@@ -42,22 +42,22 @@ export class TeamLobbyService {
   }
 
   setNickname(nickname: string): void {
-    this.roster.setNickname(nickname);
+    this.players.setNickname(nickname);
   }
 
   setReady(ready: boolean): void {
-    this.roster.setReady(ready);
+    this.players.setReady(ready);
   }
 
   chooseTeam(teamId: string): void {
     if (!this.teamIds.includes(teamId)) {
       throw new Error(`[TeamLobbyService] Unknown team "${teamId}".`);
     }
-    this.roster.setLocalMetadata({ teamId });
+    this.players.setLocalMetadata({ teamId });
   }
 
   leaveTeam(): void {
-    this.roster.setLocalMetadata({ teamId: null });
+    this.players.setLocalMetadata({ teamId: null });
   }
 
   areAllPlayersReady(): boolean {
@@ -66,18 +66,18 @@ export class TeamLobbyService {
   }
 
   onPlayerJoined(handler: (player: LobbyPlayer) => void): () => void {
-    return this.roster.onPlayerJoined(handler);
+    return this.players.onPlayerJoined(handler);
   }
 
   onPlayerRejoined(handler: (player: LobbyPlayer) => void): () => void {
-    return this.roster.onPlayerRejoined(handler);
+    return this.players.onPlayerRejoined(handler);
   }
 
   onPlayerUpdated(handler: (player: LobbyPlayer) => void): () => void {
-    return this.roster.onPlayerUpdated(handler);
+    return this.players.onPlayerUpdated(handler);
   }
 
   onPlayerLeft(handler: (player: LobbyPlayer) => void): () => void {
-    return this.roster.onPlayerLeft(handler);
+    return this.players.onPlayerLeft(handler);
   }
 }

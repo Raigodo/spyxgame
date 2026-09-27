@@ -1,27 +1,20 @@
 import type { PlayerProfile, PlayerSession } from "@/shared/infrastructure/player";
 import type { SignalingPeerId } from "@/shared/infrastructure/signaling";
 import type { RtcPeerStatus } from "@/shared/infrastructure/webrtc";
+import type { PlayerPresence } from "./types";
 
-export interface PlayerPresence {
-  status: RtcPeerStatus | "self";
-  returning: boolean;
-}
-
-interface RestoredState {
-  ready: boolean;
-  teamId?: string;
-}
+type PersistedMetadata = Record<string, unknown>;
 
 type PresenceEntry = { status: RtcPeerStatus; returning: boolean };
 type PresenceMap = Record<SignalingPeerId, PresenceEntry>;
 
-type PresenceMessage = { __lobbyPresence: true; presence: PresenceMap };
-type RestoreMessage = { __lobbyRestore: true; state: RestoredState };
-type PingMessage = { __lobbyPing: true; nonce: string };
-type PongMessage = { __lobbyPong: true; nonce: string };
-type SessionRejectedMessage = { __lobbySessionRejected: true };
+type PresenceStatusMessage = { __presenceStatus: true; presence: PresenceMap };
+type RestoreMessage = { __presenceRestore: true; metadata: PersistedMetadata };
+type PingMessage = { __presencePing: true; nonce: string };
+type PongMessage = { __presencePong: true; nonce: string };
+type SessionRejectedMessage = { __presenceSessionRejected: true };
 type DuplicateDetectedMessage = {
-  __lobbyDuplicateDetected: true;
+  __presenceDuplicateDetected: true;
   playerId: string;
   oldPeerId: SignalingPeerId;
   newPeerId: SignalingPeerId;
@@ -46,27 +39,41 @@ interface ActiveDuplicate {
   safetyTimeoutHandle: ReturnType<typeof setTimeout>;
 }
 
-// Tracks connection status, "have we seen this playerId before" history, and
-// resolves the same-playerId-live-twice case.
+// The only place in the app that knows about connection status, "have we
+// seen this playerId before" history, and the same-playerId-live-twice
+// case. Wrapped by PlayerPresenceService — nothing above that layer (lobby,
+// game, or anything else built on PlayerSession) needs to know any of this
+// exists, and none of it is specific to any one app phase.
 //
-//  - Connection status / "returning" bookkeeping: host-only, unchanged.
-//  - Duplicate-session arbitration is host-only and liveness-based: when a
+//  - Connection status tracking: host-only. The host is the only peer with
+//    a direct RTC link to everyone, so it's the only one who can observe
+//    real connection state firsthand; it broadcasts that state to everyone
+//    else.
+//  - Returning-player detection: host-only. On a player's departure, their
+//    *entire* metadata bag is snapshotted under their durable playerId; if
+//    that playerId rejoins later (new peerId, same person), the host
+//    replays the snapshot back to them. This is deliberately generic — this
+//    layer has no idea whether "ready", "teamId", or some future
+//    game-phase field is inside that bag, which is exactly what lets the
+//    same mechanism work unmodified whether the rejoin happens in the
+//    lobby or mid-game.
+//  - Duplicate-session arbitration: host-only and liveness-based. When a
 //    new peer's playerId matches an already-live peer, the host pings the
 //    existing one and waits briefly. A reply means it's genuinely still
 //    connected, so the newcomer is rejected. Silence means it's a ghost, so
 //    the existing one is forcibly removed and the newcomer proceeds.
-//  - Display hiding (this addition): the moment arbitration starts, the
-//    host broadcasts which pair of peerIds is involved. Every peer —
-//    including the host itself, applied directly rather than through its
-//    own echoed broadcast — uses that to show ONE row for the disputed
-//    playerId (the pre-existing one, as "reconnecting") instead of two, and
-//    to withhold the newcomer's join event until the outcome is known. Pure
-//    display bookkeeping: PlayerSession's own directory is never touched by
-//    any of this, only what LobbyRoster chooses to expose.
-export class LobbyPresenceTracker {
+//  - Display hiding: the moment arbitration starts, the host broadcasts
+//    which pair of peerIds is involved. Every peer — including the host
+//    itself, applied directly rather than through its own echoed broadcast
+//    — uses that to show ONE entry for the disputed playerId (the
+//    pre-existing one, as "reconnecting") instead of two, and to withhold
+//    the newcomer's presence until the outcome is known. Pure display
+//    bookkeeping: PlayerSession's own directory is never touched by any of
+//    this, only what PlayerPresenceService chooses to expose.
+export class PlayerReconnectionCoordinator {
   private readonly hostStatuses = new Map<SignalingPeerId, RtcPeerStatus>();
   private readonly returningPeerIds = new Set<SignalingPeerId>();
-  private readonly history = new Map<string, RestoredState>();
+  private readonly history = new Map<string, PersistedMetadata>();
   private remotePresence: PresenceMap = {};
 
   // Host-only: tracks the ping/timeout for an in-flight liveness check.
@@ -115,7 +122,7 @@ export class LobbyPresenceTracker {
           const remembered = playerId ? this.history.get(playerId) : undefined;
           if (remembered) {
             this.returningPeerIds.add(profile.peerId);
-            const restore: RestoreMessage = { __lobbyRestore: true, state: remembered };
+            const restore: RestoreMessage = { __presenceRestore: true, metadata: remembered };
             this.session.sendToPlayer(profile.peerId, restore);
           }
 
@@ -126,11 +133,7 @@ export class LobbyPresenceTracker {
       session.onPlayerLeft((profile) => {
         const playerId = readPlayerId(profile.metadata);
         if (playerId) {
-          this.history.set(playerId, {
-            ready: Boolean(profile.metadata.ready),
-            teamId:
-              typeof profile.metadata.teamId === "string" ? profile.metadata.teamId : undefined,
-          });
+          this.history.set(playerId, { ...profile.metadata });
         }
 
         this.resolveActiveDuplicate(profile.peerId);
@@ -148,7 +151,7 @@ export class LobbyPresenceTracker {
         // hide a duplicate, even though only the host ever initiates any of
         // them.
         if (isPingMessage(payload) && from === session.getHostPeerId()) {
-          const pong: PongMessage = { __lobbyPong: true, nonce: payload.nonce };
+          const pong: PongMessage = { __presencePong: true, nonce: payload.nonce };
           this.session.sendToPlayer(from, pong);
           return;
         }
@@ -157,7 +160,7 @@ export class LobbyPresenceTracker {
           this.session
             .leave()
             .catch((error) =>
-              console.warn("[LobbyPresenceTracker] Failed to leave after rejection", error)
+              console.warn("[PlayerReconnectionCoordinator] Failed to leave after rejection", error)
             );
           return;
         }
@@ -170,16 +173,11 @@ export class LobbyPresenceTracker {
         if (from === session.getLocalPlayer()?.peerId) return; // our own broadcast, echoed back
         if (from !== session.getHostPeerId()) return; // everything else is host-only broadcast
 
-        if (isPresenceMessage(payload)) {
+        if (isPresenceStatusMessage(payload)) {
           this.remotePresence = payload.presence;
           this.emitChanged();
         } else if (isRestoreMessage(payload)) {
-          this.session.updateLocalProfile({
-            metadata: {
-              ready: payload.state.ready,
-              ...(payload.state.teamId ? { teamId: payload.state.teamId } : {}),
-            },
-          });
+          this.session.updateLocalProfile({ metadata: payload.metadata });
         } else if (isPongMessage(payload)) {
           this.handlePong(from, payload.nonce);
         }
@@ -234,9 +232,9 @@ export class LobbyPresenceTracker {
   }
 
   // True for the newcomer's peerId while its duplicate is being arbitrated —
-  // LobbyRoster filters these out of getPlayers() entirely, except for the
-  // local player's own row (see LobbyRoster.getPlayers()), so a peer waiting
-  // on its own arbitration outcome doesn't disappear from its own view.
+  // PlayerPresenceService filters these out of getPlayers() entirely,
+  // except for the local player's own row, so a peer waiting on its own
+  // arbitration outcome doesn't disappear from its own view.
   isHiddenDuringArbitration(peerId: SignalingPeerId): boolean {
     for (const duplicate of this.activeDuplicates.values()) {
       if (duplicate.newPeerId === peerId) return true;
@@ -280,9 +278,9 @@ export class LobbyPresenceTracker {
   ): void {
     if (this.activeDuplicates.has(playerId)) return;
     const safetyTimeoutHandle = setTimeout(() => {
-      // We never heard a definitive resolution (a dropped message,
-      // most likely) — reveal whichever side is actually still present
-      // rather than hiding it forever.
+      // We never heard a definitive resolution (a dropped message, most
+      // likely) — reveal whichever side is actually still present rather
+      // than hiding it forever.
       this.activeDuplicates.delete(playerId);
       const stillThere = this.session.getPlayers().some((p) => p.peerId === newPeerId);
       if (stillThere) {
@@ -296,8 +294,9 @@ export class LobbyPresenceTracker {
 
   private resolveActiveDuplicate(departedPeerId: SignalingPeerId): void {
     for (const [playerId, duplicate] of this.activeDuplicates) {
-      if (duplicate.oldPeerId !== departedPeerId && duplicate.newPeerId !== departedPeerId)
+      if (duplicate.oldPeerId !== departedPeerId && duplicate.newPeerId !== departedPeerId) {
         continue;
+      }
 
       clearTimeout(duplicate.safetyTimeoutHandle);
       this.activeDuplicates.delete(playerId);
@@ -353,7 +352,7 @@ export class LobbyPresenceTracker {
       timeoutHandle,
     });
 
-    const ping: PingMessage = { __lobbyPing: true, nonce };
+    const ping: PingMessage = { __presencePing: true, nonce };
     this.session.sendToPlayer(existing.peerId, ping);
   }
 
@@ -368,12 +367,12 @@ export class LobbyPresenceTracker {
   }
 
   private reject(peerId: SignalingPeerId): void {
-    const message: SessionRejectedMessage = { __lobbySessionRejected: true };
+    const message: SessionRejectedMessage = { __presenceSessionRejected: true };
     this.session.sendToPlayer(peerId, message); // best-effort courtesy notice
     this.session
       .hostRemovePeer(peerId)
       .catch((error) =>
-        console.warn("[LobbyPresenceTracker] Failed to remove rejected peer", error)
+        console.warn("[PlayerReconnectionCoordinator] Failed to remove rejected peer", error)
       );
   }
 
@@ -387,7 +386,7 @@ export class LobbyPresenceTracker {
     newPeerId: SignalingPeerId
   ): void {
     const message: DuplicateDetectedMessage = {
-      __lobbyDuplicateDetected: true,
+      __presenceDuplicateDetected: true,
       playerId,
       oldPeerId,
       newPeerId,
@@ -402,7 +401,7 @@ export class LobbyPresenceTracker {
     for (const [peerId, status] of this.hostStatuses) {
       presence[peerId] = { status, returning: this.returningPeerIds.has(peerId) };
     }
-    const message: PresenceMessage = { __lobbyPresence: true, presence };
+    const message: PresenceStatusMessage = { __presenceStatus: true, presence };
     this.session.broadcast(message);
     this.emitChanged();
   }
@@ -416,11 +415,11 @@ function readPlayerId(metadata: Record<string, unknown>): string | undefined {
   return typeof metadata.playerId === "string" ? metadata.playerId : undefined;
 }
 
-function isPresenceMessage(value: unknown): value is PresenceMessage {
+function isPresenceStatusMessage(value: unknown): value is PresenceStatusMessage {
   return (
     typeof value === "object" &&
     value !== null &&
-    (value as Record<string, unknown>).__lobbyPresence === true
+    (value as Record<string, unknown>).__presenceStatus === true
   );
 }
 
@@ -428,7 +427,7 @@ function isRestoreMessage(value: unknown): value is RestoreMessage {
   return (
     typeof value === "object" &&
     value !== null &&
-    (value as Record<string, unknown>).__lobbyRestore === true
+    (value as Record<string, unknown>).__presenceRestore === true
   );
 }
 
@@ -436,7 +435,7 @@ function isPingMessage(value: unknown): value is PingMessage {
   return (
     typeof value === "object" &&
     value !== null &&
-    (value as Record<string, unknown>).__lobbyPing === true
+    (value as Record<string, unknown>).__presencePing === true
   );
 }
 
@@ -444,7 +443,7 @@ function isPongMessage(value: unknown): value is PongMessage {
   return (
     typeof value === "object" &&
     value !== null &&
-    (value as Record<string, unknown>).__lobbyPong === true
+    (value as Record<string, unknown>).__presencePong === true
   );
 }
 
@@ -452,7 +451,7 @@ function isSessionRejectedMessage(value: unknown): value is SessionRejectedMessa
   return (
     typeof value === "object" &&
     value !== null &&
-    (value as Record<string, unknown>).__lobbySessionRejected === true
+    (value as Record<string, unknown>).__presenceSessionRejected === true
   );
 }
 
@@ -460,6 +459,6 @@ function isDuplicateDetectedMessage(value: unknown): value is DuplicateDetectedM
   return (
     typeof value === "object" &&
     value !== null &&
-    (value as Record<string, unknown>).__lobbyDuplicateDetected === true
+    (value as Record<string, unknown>).__presenceDuplicateDetected === true
   );
 }

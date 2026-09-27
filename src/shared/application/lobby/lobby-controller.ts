@@ -1,21 +1,10 @@
+import type { PlayerPresenceService } from "@/shared/application/presence";
 import type { PlayerSession } from "@/shared/infrastructure/player";
 import type { SignalingPeerId } from "@/shared/infrastructure/signaling";
 import { FreeForAllLobbyService } from "./free-for-all-lobby-service";
-import { LobbyRoster } from "./lobby-roster";
+import { LobbyPlayerView } from "./lobby-player-view";
 import { TeamLobbyService } from "./team-lobby-service";
-import type { LobbyMode, LobbyPlayer } from "./types";
-
-export type Lobby = FreeForAllLobbyService | TeamLobbyService;
-
-export type LobbyConfig = { mode: "free-for-all" } | { mode: "teams"; teamIds: string[] };
-
-export interface LobbySnapshot {
-  mode: LobbyMode;
-  teamIds?: string[];
-  hostPeerId?: SignalingPeerId;
-  localPeerId?: SignalingPeerId;
-  players: LobbyPlayer[];
-}
+import type { Lobby, LobbyConfig, LobbyMode, LobbySnapshot } from "./types";
 
 type LobbyControlMessage =
   | { __lobbyControl: true; mode: "free-for-all" }
@@ -24,41 +13,51 @@ type LobbyControlMessage =
 type LobbyChangedHandler = (lobby: Lobby) => void;
 
 // Single entry point for lobby features on top of an already-joined
-// PlayerSession. Owns which lobby "shape" is currently active and keeps it
-// synced across every peer via the same session used for everything else —
-// the host can switch shapes at any time without anyone creating a new
+// PlayerSession and a PlayerPresenceService shared with the rest of the
+// app's lifetime — it's constructed once elsewhere and keeps running,
+// untouched, once the game starts. LobbyController itself never touches
+// connection status, reconnects, or duplicate sessions; that's entirely
+// PlayerPresenceService's job. This class only owns which lobby "shape" is
+// currently active (free-for-all vs teams) and keeps that shape synced
+// across every peer, using the same session used for everything else — the
+// host can switch shapes at any time without anyone creating a new
 // PlayerSession or rejoining the room.
 export class LobbyController {
-  private readonly roster: LobbyRoster;
+  private readonly players: LobbyPlayerView;
   private lobby: Lobby;
   private readonly changedHandlers = new Set<LobbyChangedHandler>();
   private readonly cleanupFns: Array<() => void> = [];
 
   constructor(
     private readonly session: PlayerSession,
+    presence: PlayerPresenceService,
     initialConfig: LobbyConfig = { mode: "free-for-all" }
   ) {
-    this.roster = new LobbyRoster(session);
+    this.players = new LobbyPlayerView(presence);
     this.lobby = this.createLobby(initialConfig);
 
     this.cleanupFns.push(
       session.onMessage((payload, from) => this.handleMessage(payload, from)),
 
-      // A peer who joins after the mode was already switched has no other
-      // way to learn the current shape — everyone else learned it at
-      // switch time, which already happened.
-      session.onPlayerJoined((player) => {
-        const localPeerId = session.getLocalPlayer()?.peerId;
-        if (!session.isHost() || player.peerId === localPeerId) return;
-        session.sendToPlayer(player.peerId, this.toControlMessage(this.currentConfig()));
-      })
+      // A peer who joins — or rejoins — after the mode was already switched
+      // has no other way to learn the current shape: everyone else learned
+      // it at switch time, which already happened. Sourced from the
+      // presence-aware roster rather than raw session events, so a
+      // newcomer still being arbitrated as a duplicate session doesn't get
+      // sent a config it may never need.
+      this.players.onPlayerJoined((player) => this.syncModeToNewcomer(player.peerId)),
+      this.players.onPlayerRejoined((player) => this.syncModeToNewcomer(player.peerId))
     );
   }
 
+  // Tears down only lobby-owned listeners: the mode-switch protocol and the
+  // late-joiner sync. The PlayerPresenceService passed into the constructor
+  // is owned by whoever created it and keeps running untouched — reconnects
+  // during the game are its job, not this one's, and this class was never
+  // in a position to interrupt them even accidentally.
   dispose(): void {
     for (const cleanup of this.cleanupFns) cleanup();
     this.cleanupFns.length = 0;
-    this.roster.dispose();
   }
 
   getMode(): LobbyMode {
@@ -74,10 +73,6 @@ export class LobbyController {
     return () => this.changedHandlers.delete(handler);
   }
 
-  onSessionSuperseded(handler: () => void): () => void {
-    return this.roster.onSessionSuperseded(handler);
-  }
-
   switchToFreeForAll(): void {
     this.applyModeSwitch({ mode: "free-for-all" }, true);
   }
@@ -87,8 +82,9 @@ export class LobbyController {
   }
 
   // Passive export — no broadcast, no game-lifecycle opinion. The app reads
-  // this, disposes the lobby, and constructs whatever GameService it wants
-  // with the same PlayerSession, which is still joined and untouched.
+  // this, disposes the lobby, and constructs whatever GameController it
+  // wants with the same PlayerSession and PlayerPresenceService, both of
+  // which are still joined and untouched.
   getSnapshot(): LobbySnapshot {
     const config = this.currentConfig();
     return {
@@ -101,15 +97,14 @@ export class LobbyController {
   }
 
   // Convenience for a "Start" button: snapshot + dispose in one call. Only
-  // ever tears down lobby-local listeners (roster events, presence
-  // tracking, mode-switch control messages) — never the underlying
-  // PlayerSession/WebRtcService connections, which are meant to be reused
-  // as-is by whatever comes next, just with new callbacks attached. Unlike
-  // switchToTeams/switchToFreeForAll, this is NOT host-gated: every peer,
-  // host and guests alike, needs to call this locally when the game
-  // actually begins — it's a per-tab teardown, not a network action, so
-  // coordinating *when* everyone calls it is the app's job, not this
-  // class's.
+  // ever tears down lobby-local listeners (the mode-switch protocol and
+  // late-joiner sync) — never PlayerSession, WebRtcService, or
+  // PlayerPresenceService, all meant to be reused as-is by whatever comes
+  // next, just with new callbacks attached. Unlike switchToTeams /
+  // switchToFreeForAll, this is NOT host-gated: every peer, host and guests
+  // alike, needs to call this locally when the game actually begins — it's
+  // a per-tab teardown, not a network action, so coordinating *when*
+  // everyone calls it is the app's job, not this class's.
   startGame(): LobbySnapshot {
     const snapshot = this.getSnapshot();
     this.dispose();
@@ -140,8 +135,14 @@ export class LobbyController {
 
   private createLobby(config: LobbyConfig): Lobby {
     return config.mode === "teams"
-      ? new TeamLobbyService(this.roster, config.teamIds)
-      : new FreeForAllLobbyService(this.roster);
+      ? new TeamLobbyService(this.players, config.teamIds)
+      : new FreeForAllLobbyService(this.players);
+  }
+
+  private syncModeToNewcomer(peerId: SignalingPeerId): void {
+    const localPeerId = this.session.getLocalPlayer()?.peerId;
+    if (!this.session.isHost() || peerId === localPeerId) return;
+    this.session.sendToPlayer(peerId, this.toControlMessage(this.currentConfig()));
   }
 
   private toControlMessage(config: LobbyConfig): LobbyControlMessage {

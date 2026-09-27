@@ -1,25 +1,25 @@
-import type { LobbyRoster } from "./lobby-roster";
+import type { LobbyPlayerView } from "./lobby-player-view";
 import type { LobbyPlayer } from "./types";
 
 export class FreeForAllLobbyService {
   readonly mode = "free-for-all" as const;
 
-  constructor(private readonly roster: LobbyRoster) {}
+  constructor(private readonly players: LobbyPlayerView) {}
 
   getLocalPlayer(): LobbyPlayer | undefined {
-    return this.roster.getLocalPlayer();
+    return this.players.getLocalPlayer();
   }
 
   getPlayers(): LobbyPlayer[] {
-    return this.roster.getPlayers();
+    return this.players.getPlayers();
   }
 
   setNickname(nickname: string): void {
-    this.roster.setNickname(nickname);
+    this.players.setNickname(nickname);
   }
 
   setReady(ready: boolean): void {
-    this.roster.setReady(ready);
+    this.players.setReady(ready);
   }
 
   areAllPlayersReady(): boolean {
@@ -28,18 +28,18 @@ export class FreeForAllLobbyService {
   }
 
   onPlayerJoined(handler: (player: LobbyPlayer) => void): () => void {
-    return this.roster.onPlayerJoined(handler);
+    return this.players.onPlayerJoined(handler);
   }
 
   onPlayerRejoined(handler: (player: LobbyPlayer) => void): () => void {
-    return this.roster.onPlayerRejoined(handler);
+    return this.players.onPlayerRejoined(handler);
   }
 
   onPlayerUpdated(handler: (player: LobbyPlayer) => void): () => void {
-    return this.roster.onPlayerUpdated(handler);
+    return this.players.onPlayerUpdated(handler);
   }
 
   onPlayerLeft(handler: (player: LobbyPlayer) => void): () => void {
-    return this.roster.onPlayerLeft(handler);
+    return this.players.onPlayerLeft(handler);
   }
 }

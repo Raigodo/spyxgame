@@ -20,17 +20,22 @@ export class PlayerDirectory {
   // Replaces the whole directory (used when a guest applies a full roster
   // snapshot from the host), diffed against the previous contents so
   // joined/updated/left events still fire correctly for consumers.
+  //
+  // Stale ids are snapshotted up front rather than filtered while walking
+  // `this.players.values()` — deleting the *current* key mid-iteration is
+  // spec-safe, but deleting arbitrary other keys while iterating invites
+  // exactly the kind of "is this still correct if I touch it later" doubt
+  // this class shouldn't leave lying around.
   replaceAll(profiles: PlayerProfile[]): void {
     const incomingIds = new Set(profiles.map((p) => p.peerId));
+    const staleIds = Array.from(this.players.keys()).filter((id) => !incomingIds.has(id));
 
     for (const profile of profiles) {
       this.upsert(profile);
     }
 
-    for (const existing of this.players.values()) {
-      if (!incomingIds.has(existing.peerId)) {
-        this.remove(existing.peerId);
-      }
+    for (const id of staleIds) {
+      this.remove(id);
     }
   }
 
