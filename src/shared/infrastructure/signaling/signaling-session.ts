@@ -184,6 +184,18 @@ export class SignalingSession {
     await this.sendSignal(peerId, { type: "ice-candidate", candidate }, onAckTimeout, true);
   }
 
+  // Forcibly removes another peer from the room. No liveness opinion here —
+  // that judgment belongs to whoever calls this (see PlayerSession).
+  public async removePeer(peerId: SignalingPeerId): Promise<void> {
+    if (!this.localRoomId) {
+      throw new Error("[SignalingSession] Not joined to a room.");
+    }
+    await this.membershipGateway.removePeer(this.localRoomId, peerId);
+    await this.messageGateway.clearInbox(this.localRoomId, peerId).catch((error) => {
+      console.warn("[SignalingSession] Failed to clear removed peer's inbox", error);
+    });
+  }
+
   // ─── Private ──────────────────────────────────────────────────────────────
 
   private async sendSignal(

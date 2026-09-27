@@ -64,6 +64,17 @@ export class PlayerSession {
     await this.rtc.leaveRoom();
   }
 
+  // Forcibly removes another player. Host-only. Purely mechanical — sends no
+  // notice to the removed player. Callers that want the removed player to
+  // get a chance to clean up gracefully (like the lobby's arbitration below)
+  // should message them first.
+  async hostRemovePeer(peerId: SignalingPeerId): Promise<void> {
+    if (!this.isHost()) {
+      throw new Error("[PlayerSession] Only the host can remove another player.");
+    }
+    await this.rtc.removePeer(peerId);
+  }
+
   getLocalPlayer(): PlayerProfile | undefined {
     return this.localProfile;
   }

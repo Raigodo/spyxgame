@@ -22,7 +22,6 @@ type LobbyControlMessage =
   | { __lobbyControl: true; mode: "teams"; teamIds: string[] };
 
 type LobbyChangedHandler = (lobby: Lobby) => void;
-type DuplicateHandler = () => void;
 
 // Single entry point for lobby features on top of an already-joined
 // PlayerSession. Owns which lobby "shape" is currently active and keeps it
@@ -75,8 +74,8 @@ export class LobbyController {
     return () => this.changedHandlers.delete(handler);
   }
 
-  onDuplicateSessionRejected(handler: DuplicateHandler): () => void {
-    return this.roster.onDuplicateSessionRejected(handler);
+  onSessionSuperseded(handler: () => void): () => void {
+    return this.roster.onSessionSuperseded(handler);
   }
 
   switchToFreeForAll(): void {

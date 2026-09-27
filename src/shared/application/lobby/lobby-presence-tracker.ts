@@ -17,35 +17,47 @@ type PresenceMap = Record<SignalingPeerId, PresenceEntry>;
 
 type PresenceMessage = { __lobbyPresence: true; presence: PresenceMap };
 type RestoreMessage = { __lobbyRestore: true; state: RestoredState };
+type PingMessage = { __lobbyPing: true; nonce: string };
+type PongMessage = { __lobbyPong: true; nonce: string };
+type SessionRejectedMessage = { __lobbySessionRejected: true };
 
 type ChangeHandler = () => void;
-type DuplicateHandler = () => void;
+type SupersededHandler = () => void;
+
+const PING_TIMEOUT_MS = 2000;
+
+interface PendingArbitration {
+  nonce: string;
+  oldPeerId: SignalingPeerId;
+  newPeerId: SignalingPeerId;
+  timeoutHandle: ReturnType<typeof setTimeout>;
+}
 
 // Tracks connection status, "have we seen this playerId before" history, and
-// "is this playerId already live elsewhere right now" duplicate detection.
+// resolves the same-playerId-live-twice case.
 //
-//  - Every peer maintains `history` and does duplicate detection regardless
-//    of role — both are cheap, and it means a peer promoted to host
-//    mid-session isn't starting blank.
-//  - Only whichever peer *currently is* host acts on connection status and
-//    "returning" bookkeeping: observes real RTC statuses, decides who's
-//    returning, sends them their old ready/team state, and broadcasts the
-//    combined picture over the same generic app-message channel
-//    LobbyController uses for mode switches.
-//  - Duplicate-session detection is symmetric and needs no host
-//    involvement: every peer independently compares its own playerId
-//    against everyone else's, using a join-time timestamp frozen in
-//    metadata (sessionStartedAt) to agree, without coordination, on which
-//    of two concurrent sessions for the same playerId is older. The newer
-//    one evicts itself by calling session.leave().
+//  - Connection status / "returning" bookkeeping: host-only, unchanged.
+//  - Duplicate-session arbitration is host-only and liveness-based, not a
+//    heuristic: when a new peer's playerId matches an already-live peer,
+//    the host pings the existing one directly and waits briefly. A reply
+//    means it's genuinely still connected, so the *newcomer* is rejected.
+//    Silence means it's a ghost (most commonly a pre-refresh leftover), so
+//    the *existing* one is forcibly removed via PlayerSession.hostRemovePeer
+//    and the newcomer proceeds normally. Every peer, regardless of role,
+//    must be able to answer a ping addressed to it and act on a rejection
+//    addressed to it — only *initiating* a ping is host-only.
 export class LobbyPresenceTracker {
   private readonly hostStatuses = new Map<SignalingPeerId, RtcPeerStatus>();
   private readonly returningPeerIds = new Set<SignalingPeerId>();
   private readonly history = new Map<string, RestoredState>();
   private remotePresence: PresenceMap = {};
 
+  // Keyed by playerId, so a second join for the same playerId while an
+  // arbitration is already in flight doesn't kick off an overlapping one.
+  private readonly pendingArbitrations = new Map<string, PendingArbitration>();
+
   private readonly changeHandlers = new Set<ChangeHandler>();
-  private readonly duplicateHandlers = new Set<DuplicateHandler>();
+  private readonly supersededHandlers = new Set<SupersededHandler>();
   private readonly cleanupFns: Array<() => void> = [];
 
   constructor(private readonly session: PlayerSession) {
@@ -54,7 +66,11 @@ export class LobbyPresenceTracker {
       if (profile.peerId === localPeerId) continue;
       const status = session.getPeerConnectionStatus(profile.peerId);
       if (status) this.hostStatuses.set(profile.peerId, status);
-      this.checkForDuplicateSession(profile);
+    }
+    if (session.isHost()) {
+      for (const profile of session.getPlayers()) {
+        this.arbitrateIfDuplicate(profile);
+      }
     }
 
     this.cleanupFns.push(
@@ -65,16 +81,15 @@ export class LobbyPresenceTracker {
       }),
 
       session.onPlayerJoined((profile) => {
-        this.checkForDuplicateSession(profile);
-
-        const playerId = readPlayerId(profile.metadata);
-
         if (session.isHost()) {
+          this.arbitrateIfDuplicate(profile);
+
           this.hostStatuses.set(
             profile.peerId,
             session.getPeerConnectionStatus(profile.peerId) ?? "connecting"
           );
 
+          const playerId = readPlayerId(profile.metadata);
           const remembered = playerId ? this.history.get(playerId) : undefined;
           if (remembered) {
             this.returningPeerIds.add(profile.peerId);
@@ -105,7 +120,26 @@ export class LobbyPresenceTracker {
 
       session.onMessage((payload, from) => {
         if (from === session.getLocalPlayer()?.peerId) return; // our own broadcast, echoed back
-        if (from !== session.getHostPeerId()) return; // only the host may speak for presence
+
+        // These two can arrive at anyone, regardless of role — a guest must
+        // be able to answer a ping and act on a rejection even though only
+        // the host ever sends either.
+        if (isPingMessage(payload) && from === session.getHostPeerId()) {
+          const pong: PongMessage = { __lobbyPong: true, nonce: payload.nonce };
+          this.session.sendToPlayer(from, pong);
+          return;
+        }
+        if (isSessionRejectedMessage(payload) && from === session.getHostPeerId()) {
+          for (const handler of this.supersededHandlers) handler();
+          this.session
+            .leave()
+            .catch((error) =>
+              console.warn("[LobbyPresenceTracker] Failed to leave after rejection", error)
+            );
+          return;
+        }
+
+        if (from !== session.getHostPeerId()) return; // everything else is host-only broadcast
 
         if (isPresenceMessage(payload)) {
           this.remotePresence = payload.presence;
@@ -117,6 +151,8 @@ export class LobbyPresenceTracker {
               ...(payload.state.teamId ? { teamId: payload.state.teamId } : {}),
             },
           });
+        } else if (isPongMessage(payload)) {
+          this.handlePong(from, payload.nonce);
         }
       })
     );
@@ -125,6 +161,10 @@ export class LobbyPresenceTracker {
   dispose(): void {
     for (const cleanup of this.cleanupFns) cleanup();
     this.cleanupFns.length = 0;
+    for (const arbitration of this.pendingArbitrations.values()) {
+      clearTimeout(arbitration.timeoutHandle);
+    }
+    this.pendingArbitrations.clear();
     this.hostStatuses.clear();
     this.returningPeerIds.clear();
     this.history.clear();
@@ -161,44 +201,78 @@ export class LobbyPresenceTracker {
     return () => this.changeHandlers.delete(handler);
   }
 
-  // Fires only on the session that loses the tie-break and is about to call
-  // session.leave() on itself. The winning (older) session is never
-  // notified — nothing changes for it.
-  onDuplicateSessionRejected(handler: DuplicateHandler): () => void {
-    this.duplicateHandlers.add(handler);
-    return () => this.duplicateHandlers.delete(handler);
+  // Fires on whichever side the host's arbitration rejects — the newcomer
+  // if the existing connection answered its ping, or the pre-existing one
+  // if it turned out to be a ghost. Either way, that side is about to call
+  // session.leave() on itself in response to the host's message.
+  onSessionSuperseded(handler: SupersededHandler): () => void {
+    this.supersededHandlers.add(handler);
+    return () => this.supersededHandlers.delete(handler);
   }
 
-  // ─── Private ──────────────────────────────────────────────────────────────
+  // ─── Private — host-only arbitration ───────────────────────────────────────
 
-  private checkForDuplicateSession(remoteProfile: PlayerProfile): void {
-    const localProfile = this.session.getLocalPlayer();
-    if (!localProfile || remoteProfile.peerId === localProfile.peerId) return;
+  private arbitrateIfDuplicate(newProfile: PlayerProfile): void {
+    // Never treat our own local join as "the newcomer" — see the
+    // host-refreshes-itself note above for why that case is handled
+    // elsewhere instead.
+    if (newProfile.peerId === this.session.getLocalPlayer()?.peerId) return;
 
-    const myPlayerId = readPlayerId(localProfile.metadata);
-    const theirPlayerId = readPlayerId(remoteProfile.metadata);
-    if (!myPlayerId || !theirPlayerId || myPlayerId !== theirPlayerId) return;
+    const playerId = readPlayerId(newProfile.metadata);
+    if (!playerId) return;
+    if (this.pendingArbitrations.has(playerId)) return; // one arbitration at a time per playerId
 
-    const mySessionStart = readSessionStart(localProfile.metadata);
-    const theirSessionStart = readSessionStart(remoteProfile.metadata);
+    const existing = this.session
+      .getPlayers()
+      .find((p) => p.peerId !== newProfile.peerId && readPlayerId(p.metadata) === playerId);
+    if (!existing) return;
 
-    // The newer session evicts itself; ties (same millisecond) are broken
-    // deterministically so both sides agree without any coordination.
-    const iAmNewer =
-      mySessionStart !== theirSessionStart
-        ? mySessionStart > theirSessionStart
-        : localProfile.peerId > remoteProfile.peerId;
+    const localPeerId = this.session.getLocalPlayer()?.peerId;
 
-    if (!iAmNewer) return;
+    // The host's own tab is trivially known to be alive — no ping needed.
+    if (existing.peerId === localPeerId) {
+      this.reject(newProfile.peerId);
+      return;
+    }
 
-    for (const handler of this.duplicateHandlers) handler();
+    const nonce = crypto.randomUUID();
+    const timeoutHandle = setTimeout(() => {
+      const pending = this.pendingArbitrations.get(playerId);
+      if (!pending || pending.nonce !== nonce) return; // already resolved by a pong
+      this.pendingArbitrations.delete(playerId);
+      this.reject(pending.oldPeerId); // no reply in time — treat as a ghost
+    }, PING_TIMEOUT_MS);
+
+    this.pendingArbitrations.set(playerId, {
+      nonce,
+      oldPeerId: existing.peerId,
+      newPeerId: newProfile.peerId,
+      timeoutHandle,
+    });
+
+    const ping: PingMessage = { __lobbyPing: true, nonce };
+    this.session.sendToPlayer(existing.peerId, ping);
+  }
+
+  private handlePong(fromPeerId: SignalingPeerId, nonce: string): void {
+    for (const [playerId, pending] of this.pendingArbitrations) {
+      if (pending.oldPeerId !== fromPeerId || pending.nonce !== nonce) continue;
+      clearTimeout(pending.timeoutHandle);
+      this.pendingArbitrations.delete(playerId);
+      // The pre-existing connection answered — genuinely still alive, so
+      // the newcomer is the one turned away.
+      this.reject(pending.newPeerId);
+      return;
+    }
+  }
+
+  private reject(peerId: SignalingPeerId): void {
+    const message: SessionRejectedMessage = { __lobbySessionRejected: true };
+    this.session.sendToPlayer(peerId, message); // best-effort courtesy notice
     this.session
-      .leave()
+      .hostRemovePeer(peerId)
       .catch((error) =>
-        console.warn(
-          "[LobbyPresenceTracker] Failed to leave after duplicate-session rejection",
-          error
-        )
+        console.warn("[LobbyPresenceTracker] Failed to remove rejected peer", error)
       );
   }
 
@@ -221,10 +295,6 @@ function readPlayerId(metadata: Record<string, unknown>): string | undefined {
   return typeof metadata.playerId === "string" ? metadata.playerId : undefined;
 }
 
-function readSessionStart(metadata: Record<string, unknown>): number {
-  return typeof metadata.sessionStartedAt === "number" ? metadata.sessionStartedAt : 0;
-}
-
 function isPresenceMessage(value: unknown): value is PresenceMessage {
   return (
     typeof value === "object" &&
@@ -238,5 +308,29 @@ function isRestoreMessage(value: unknown): value is RestoreMessage {
     typeof value === "object" &&
     value !== null &&
     (value as Record<string, unknown>).__lobbyRestore === true
+  );
+}
+
+function isPingMessage(value: unknown): value is PingMessage {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as Record<string, unknown>).__lobbyPing === true
+  );
+}
+
+function isPongMessage(value: unknown): value is PongMessage {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as Record<string, unknown>).__lobbyPong === true
+  );
+}
+
+function isSessionRejectedMessage(value: unknown): value is SessionRejectedMessage {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as Record<string, unknown>).__lobbySessionRejected === true
   );
 }

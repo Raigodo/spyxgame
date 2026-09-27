@@ -136,6 +136,10 @@ export class WebRtcService {
     this.currentHostPeerId = undefined;
   }
 
+  async removePeer(signalingPeerId: SignalingPeerId): Promise<void> {
+    await this.session.removePeer(signalingPeerId);
+  }
+
   getPeers(): RtcPeer[] {
     return this.registry.getAll();
   }

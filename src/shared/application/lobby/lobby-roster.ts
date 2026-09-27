@@ -3,7 +3,7 @@ import { LobbyPresenceTracker } from "./lobby-presence-tracker";
 import type { LobbyPlayer } from "./types";
 
 type LobbyPlayerHandler = (player: LobbyPlayer) => void;
-type DuplicateHandler = () => void;
+type SupersededHandler = () => void;
 
 export class LobbyRoster {
   private readonly presence: LobbyPresenceTracker;
@@ -90,8 +90,8 @@ export class LobbyRoster {
     return () => this.leftHandlers.delete(handler);
   }
 
-  onDuplicateSessionRejected(handler: DuplicateHandler): () => void {
-    return this.presence.onDuplicateSessionRejected(handler);
+  onSessionSuperseded(handler: SupersededHandler): () => void {
+    return this.presence.onSessionSuperseded(handler);
   }
 
   private emit(handlers: Set<LobbyPlayerHandler>, profile: PlayerProfile): void {

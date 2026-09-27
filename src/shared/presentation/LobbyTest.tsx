@@ -5,11 +5,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { loadLocalProfile, saveLocalProfile, PlayerSession } from "@/shared/infrastructure/player";
 import { WebRtcService } from "@/shared/infrastructure/webrtc";
-
-import { buildLocalProfileInput } from "@/shared/application/lobby/build-local-profile";
-import { LobbyController } from "@/shared/application/lobby/lobby-controller";
-import type { TeamLobbyService } from "@/shared/application/lobby/team-lobby-service";
-import type { LobbyMode, LobbyPlayer } from "@/shared/application/lobby/types";
+import {
+  buildLocalProfileInput,
+  LobbyController,
+  LobbyMode,
+  LobbyPlayer,
+  TeamLobbyService,
+} from "../application/lobby";
 
 function short(id: string | undefined): string {
   return id ? id.slice(0, 8) : "—";
@@ -57,7 +59,7 @@ export default function LobbyTestHarness() {
   const [teamIdsInput, setTeamIdsInput] = useState("red,blue");
   const [snapshot, setSnapshot] = useState<string | null>(null);
   const [gameSnapshot, setGameSnapshot] = useState<string | null>(null);
-  const [duplicateRejected, setDuplicateRejected] = useState(false);
+  const [sessionSuperseded, setSessionSuperseded] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
 
   const log = useCallback((message: string) => {
@@ -132,9 +134,9 @@ export default function LobbyTestHarness() {
       log(`${p.nickname} left [${short(p.peerId)}]`);
       refresh();
     });
-    const unsubDuplicate = controller.onDuplicateSessionRejected(() => {
-      setDuplicateRejected(true);
-      log("Rejected: this playerId is already connected in another tab.");
+    const unsubSuperseded = controller.onSessionSuperseded(() => {
+      setSessionSuperseded(true);
+      log("Superseded: a newer connection for this playerId took over.");
     });
 
     return () => {
@@ -143,7 +145,7 @@ export default function LobbyTestHarness() {
       unsubRejoined();
       unsubUpdated();
       unsubLeft();
-      unsubDuplicate();
+      unsubSuperseded();
     };
   }, [controller, log]);
 
@@ -168,7 +170,7 @@ export default function LobbyTestHarness() {
 
     setJoining(true);
     setJoinError(null);
-    setDuplicateRejected(false);
+    setSessionSuperseded(false);
     setGameSnapshot(null);
     try {
       const stored = loadLocalProfile(finalPlayerId);
@@ -297,13 +299,15 @@ export default function LobbyTestHarness() {
           <h1 className="font-semibold text-slate-100 text-lg">Lobby Controller Test Harness</h1>
           <p className="mt-1 text-slate-500">
             Open this in a few tabs with the same room id (and, deliberately, the same player id) to
-            simulate multiple peers or test duplicate-session rejection.
+            simulate multiple peers or test duplicate-session arbitration — the host pings whichever
+            connection already exists, and only removes it if it doesn&apos;t answer.
           </p>
         </header>
 
-        {duplicateRejected && (
+        {sessionSuperseded && (
           <div className="bg-rose-950 p-3 border border-rose-800 rounded text-rose-300">
-            This tab was rejected — the same player id is already connected elsewhere.
+            This tab was disconnected — the host found another connection for this player id (either
+            this one didn&apos;t answer a liveness check, or the other one did).
           </div>
         )}
 
