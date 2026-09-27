@@ -20,21 +20,35 @@ export class LobbyRoster {
       // A genuinely new player and a returning one both arrive through
       // PlayerSession's single onPlayerJoined event — LobbyPresenceTracker
       // has already decided which, by the time this fires (it subscribes
-      // first, inside its own constructor, above), so we just read that
-      // decision back out and route to the matching handler set.
+      // first, inside its own constructor, above). A newcomer currently
+      // being arbitrated as a duplicate is suppressed here entirely — its
+      // join event fires later, via onPeerRevealed, if it turns out to be
+      // the side that survives. The local player is exempt from
+      // suppression: a peer waiting on its own arbitration outcome must
+      // still see its own join fire normally.
       session.onPlayerJoined((p) => {
+        const localPeerId = session.getLocalPlayer()?.peerId;
+        if (p.peerId !== localPeerId && this.presence.isHiddenDuringArbitration(p.peerId)) return;
         const { returning } = this.presence.getPresence(p.peerId);
         this.emit(returning ? this.rejoinedHandlers : this.joinedHandlers, p);
       }),
       session.onPlayerUpdated((p) => this.emit(this.updatedHandlers, p)),
       session.onPlayerLeft((p) => this.emit(this.leftHandlers, p)),
 
+      this.presence.onPeerRevealed((peerId) => {
+        const profile = this.session.getPlayers().find((p) => p.peerId === peerId);
+        if (!profile) return;
+        const { returning } = this.presence.getPresence(peerId);
+        this.emit(returning ? this.rejoinedHandlers : this.joinedHandlers, profile);
+      }),
+
       // Connection status / returning flips don't flow through
-      // PlayerSession's own profile events (they're not part of the synced
-      // profile), so re-project everyone as "updated" whenever presence
-      // data changes.
+      // PlayerSession's own profile events, so re-project everyone as
+      // "updated" whenever presence data changes (this also covers a
+      // reconnecting → normal status flip once arbitration resolves).
       this.presence.onChanged(() => {
         for (const profile of this.session.getPlayers()) {
+          if (this.presence.isHiddenDuringArbitration(profile.peerId)) continue;
           this.emit(this.updatedHandlers, profile);
         }
       })
@@ -53,7 +67,11 @@ export class LobbyRoster {
   }
 
   getPlayers(): LobbyPlayer[] {
-    return this.session.getPlayers().map((p) => this.toLobbyPlayer(p));
+    const localPeerId = this.session.getLocalPlayer()?.peerId;
+    return this.session
+      .getPlayers()
+      .filter((p) => p.peerId === localPeerId || !this.presence.isHiddenDuringArbitration(p.peerId))
+      .map((p) => this.toLobbyPlayer(p));
   }
 
   setNickname(nickname: string): void {
@@ -73,8 +91,6 @@ export class LobbyRoster {
     return () => this.joinedHandlers.delete(handler);
   }
 
-  // Fires instead of onPlayerJoined when the arriving peer's playerId
-  // matches someone this lobby has already seen leave during its lifetime.
   onPlayerRejoined(handler: LobbyPlayerHandler): () => void {
     this.rejoinedHandlers.add(handler);
     return () => this.rejoinedHandlers.delete(handler);
