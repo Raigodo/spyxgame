@@ -1,20 +1,15 @@
+/* eslint-disable react-hooks/set-state-in-effect */
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { loadOrCreateIdentity, saveNickname, PlayerSession } from "@/shared/infrastructure/player";
-import type { StoredIdentity } from "@/shared/infrastructure/player";
+import { loadLocalProfile, saveLocalProfile, PlayerSession } from "@/shared/infrastructure/player";
 import { WebRtcService } from "@/shared/infrastructure/webrtc";
 
 import { buildLocalProfileInput } from "@/shared/application/lobby/build-local-profile";
 import { LobbyController } from "@/shared/application/lobby/lobby-controller";
 import type { TeamLobbyService } from "@/shared/application/lobby/team-lobby-service";
 import type { LobbyMode, LobbyPlayer } from "@/shared/application/lobby/types";
-
-// Key duplicated from player-identity-store.ts on purpose, just for this
-// harness's "simulate a new device" button. If you use this a lot, consider
-// exporting a real `clearStoredIdentity()` from that file instead.
-const IDENTITY_STORAGE_KEY = "player-identity";
 
 function short(id: string | undefined): string {
   return id ? id.slice(0, 8) : "—";
@@ -38,9 +33,11 @@ function statusStyles(status: LobbyPlayer["connectionStatus"]): string {
 export default function LobbyTestHarness() {
   // ─── Connection form state ────────────────────────────────────────────────
   const [roomId, setRoomId] = useState("");
+  const [playerId, setPlayerId] = useState("");
   const [nicknameInput, setNicknameInput] = useState("");
   const [joinError, setJoinError] = useState<string | null>(null);
   const [joining, setJoining] = useState(false);
+  const [copied, setCopied] = useState(false);
 
   // ─── Live service instances. These are ONLY ever constructed inside the
   // join/leave handlers below (event handlers), never lazily during render —
@@ -51,7 +48,6 @@ export default function LobbyTestHarness() {
   // entirely, since state is only ever set from handlers/effects too. ───────
   const [session, setSession] = useState<PlayerSession | null>(null);
   const [controller, setController] = useState<LobbyController | null>(null);
-  const [identity, setIdentity] = useState<StoredIdentity | null>(null);
 
   // ─── Derived / synced UI state ─────────────────────────────────────────────
   const [mode, setMode] = useState<LobbyMode>("free-for-all");
@@ -60,12 +56,31 @@ export default function LobbyTestHarness() {
   const [hostPeerId, setHostPeerId] = useState<string | undefined>(undefined);
   const [teamIdsInput, setTeamIdsInput] = useState("red,blue");
   const [snapshot, setSnapshot] = useState<string | null>(null);
+  const [gameSnapshot, setGameSnapshot] = useState<string | null>(null);
+  const [duplicateRejected, setDuplicateRejected] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
 
   const log = useCallback((message: string) => {
     const stamp = new Date().toLocaleTimeString();
     setLogs((prev) => [...prev.slice(-49), `${stamp}  ${message}`]);
   }, []);
+
+  // ─── Prefill playerId from the URL, the way a real Next.js page would read
+  // it via useSearchParams — kept as plain URLSearchParams here so this file
+  // has no framework dependency. ──────────────────────────────────────────────
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const fromUrl = new URLSearchParams(window.location.search).get("playerId");
+    if (fromUrl) setPlayerId(fromUrl);
+  }, []);
+
+  // Prefill nickname from this playerId's cookie-backed profile, whenever the
+  // playerId changes and we haven't joined yet.
+  useEffect(() => {
+    if (!playerId || controller) return;
+    const stored = loadLocalProfile(playerId);
+    if (stored?.nickname) setNicknameInput(stored.nickname);
+  }, [playerId, controller]);
 
   // This ref exists only so the unmount-cleanup effect can reach the *latest*
   // session/controller without re-running (and re-subscribing) on every
@@ -96,7 +111,6 @@ export default function LobbyTestHarness() {
 
     const refresh = () => setPlayers(controller.getLobby().getPlayers());
     refresh();
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setMode(controller.getMode());
 
     const lobby = controller.getLobby();
@@ -106,23 +120,30 @@ export default function LobbyTestHarness() {
       refresh();
     });
     const unsubJoined = lobby.onPlayerJoined((p) => {
-      log(`${p.nickname} joined${p.returning ? " (returning)" : ""} [${short(p.peerId)}]`);
+      log(`${p.nickname} joined [${short(p.peerId)}]`);
       refresh();
     });
-    // Covers ready/nickname/team/connection-status/returning changes alike —
-    // LobbyRoster re-projects everyone as "updated" whenever presence data
-    // changes, so this one handler is enough to stay in sync.
+    const unsubRejoined = lobby.onPlayerRejoined((p) => {
+      log(`${p.nickname} reconnected (returning player) [${short(p.peerId)}]`);
+      refresh();
+    });
     const unsubUpdated = lobby.onPlayerUpdated(() => refresh());
     const unsubLeft = lobby.onPlayerLeft((p) => {
       log(`${p.nickname} left [${short(p.peerId)}]`);
       refresh();
     });
+    const unsubDuplicate = controller.onDuplicateSessionRejected(() => {
+      setDuplicateRejected(true);
+      log("Rejected: this playerId is already connected in another tab.");
+    });
 
     return () => {
       unsubMode();
       unsubJoined();
+      unsubRejoined();
       unsubUpdated();
       unsubLeft();
+      unsubDuplicate();
     };
   }, [controller, log]);
 
@@ -143,29 +164,29 @@ export default function LobbyTestHarness() {
     const trimmedRoom = roomId.trim();
     if (!trimmedRoom) return;
 
+    const finalPlayerId = playerId.trim() || crypto.randomUUID();
+
     setJoining(true);
     setJoinError(null);
+    setDuplicateRejected(false);
+    setGameSnapshot(null);
     try {
-      const stored = loadOrCreateIdentity(nicknameInput.trim() || "Player");
-      const finalNickname = nicknameInput.trim() || stored.nickname;
-      if (finalNickname !== stored.nickname) saveNickname(finalNickname);
-      const finalIdentity: StoredIdentity = { ...stored, nickname: finalNickname };
+      const stored = loadLocalProfile(finalPlayerId);
+      const nickname = nicknameInput.trim() || stored?.nickname || "Player";
+      saveLocalProfile(finalPlayerId, { nickname });
 
       const newSession = new PlayerSession(new WebRtcService());
-      await newSession.join(
-        trimmedRoom,
-        buildLocalProfileInput(finalIdentity),
-        finalIdentity.peerId
-      );
+      // No third argument here — the signaling peerId is always freshly
+      // minted per join. Only playerId (in metadata, via
+      // buildLocalProfileInput) is durable; reusing a persisted peerId is
+      // exactly what caused two tabs to corrupt each other's connection.
+      await newSession.join(trimmedRoom, buildLocalProfileInput(finalPlayerId, nickname));
       const newController = new LobbyController(newSession);
 
-      setIdentity(finalIdentity);
+      setPlayerId(finalPlayerId);
       setSession(newSession);
       setController(newController);
-      log(
-        `Joined room "${trimmedRoom}" as ${finalIdentity.nickname} ` +
-          `[peerId=${short(finalIdentity.peerId)} playerId=${short(finalIdentity.playerId)}]`
-      );
+      log(`Joined room "${trimmedRoom}" as ${nickname} [playerId=${short(finalPlayerId)}]`);
     } catch (error) {
       setJoinError(error instanceof Error ? error.message : "Failed to join room.");
     } finally {
@@ -174,14 +195,14 @@ export default function LobbyTestHarness() {
   }
 
   async function handleLeave() {
-    if (!controller || !session) return;
-    controller.dispose();
+    if (!session) return;
+    controller?.dispose();
     await session.leave();
     setController(null);
     setSession(null);
-    setIdentity(null);
     setPlayers([]);
     setSnapshot(null);
+    setGameSnapshot(null);
     log("Left room");
   }
 
@@ -189,7 +210,7 @@ export default function LobbyTestHarness() {
     if (!controller || !nicknameInput.trim()) return;
     const nickname = nicknameInput.trim();
     controller.getLobby().setNickname(nickname);
-    saveNickname(nickname);
+    saveLocalProfile(playerId, { nickname });
     log(`Nickname → ${nickname}`);
   }
 
@@ -238,9 +259,27 @@ export default function LobbyTestHarness() {
     setSnapshot(JSON.stringify(controller.getSnapshot(), null, 2));
   }
 
-  function handleForgetIdentity() {
-    localStorage.removeItem(IDENTITY_STORAGE_KEY);
-    log("Cleared stored identity — next join will look like a brand-new device");
+  function handleStartGame() {
+    if (!controller) return;
+    const result = controller.startGame();
+    setGameSnapshot(JSON.stringify(result, null, 2));
+    setController(null); // lobby wiring is gone — session/connections stay alive
+    log("Game started — lobby wiring disposed, connection kept alive for reuse");
+  }
+
+  async function handleCopyJoinLink() {
+    if (typeof window === "undefined" || !playerId) return;
+    const url = new URL(window.location.href);
+    url.searchParams.set("playerId", playerId);
+    try {
+      await navigator.clipboard.writeText(url.toString());
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      log(
+        "Couldn't copy to clipboard — copy the URL bar manually after adding ?playerId=" + playerId
+      );
+    }
   }
 
   // ─── Derived values for rendering ──────────────────────────────────────────
@@ -257,18 +296,25 @@ export default function LobbyTestHarness() {
         <header>
           <h1 className="font-semibold text-slate-100 text-lg">Lobby Controller Test Harness</h1>
           <p className="mt-1 text-slate-500">
-            Open this in a few tabs with the same room id to simulate multiple peers.
+            Open this in a few tabs with the same room id (and, deliberately, the same player id) to
+            simulate multiple peers or test duplicate-session rejection.
           </p>
         </header>
 
+        {duplicateRejected && (
+          <div className="bg-rose-950 p-3 border border-rose-800 rounded text-rose-300">
+            This tab was rejected — the same player id is already connected elsewhere.
+          </div>
+        )}
+
         {/* Connection */}
         <section className="bg-slate-900 p-4 border border-slate-800 rounded">
-          {!controller ? (
+          {!session ? (
             <div className="flex flex-wrap items-end gap-3">
               <label className="flex flex-col gap-1">
                 <span className="text-slate-500 text-xs">Room ID</span>
                 <input
-                  className="bg-slate-950 px-2 py-1 border border-slate-700 focus:border-slate-500 rounded outline-none w-40 text-slate-100"
+                  className="bg-slate-950 px-2 py-1 border border-slate-700 focus:border-slate-500 rounded outline-none w-36 text-slate-100"
                   value={roomId}
                   onChange={(e) => setRoomId(e.target.value)}
                   placeholder="room-abc"
@@ -280,10 +326,34 @@ export default function LobbyTestHarness() {
               >
                 random
               </button>
+
+              <label className="flex flex-col gap-1">
+                <span className="text-slate-500 text-xs">Player ID (from ?playerId=)</span>
+                <input
+                  className="bg-slate-950 px-2 py-1 border border-slate-700 focus:border-slate-500 rounded outline-none w-40 text-slate-100"
+                  value={playerId}
+                  onChange={(e) => setPlayerId(e.target.value)}
+                  placeholder="(new player)"
+                />
+              </label>
+              <button
+                className="px-2 py-1 border border-slate-700 hover:border-slate-500 rounded text-slate-400 text-xs"
+                onClick={() => setPlayerId(crypto.randomUUID())}
+              >
+                generate
+              </button>
+              <button
+                className="disabled:opacity-40 px-2 py-1 border border-slate-700 hover:border-slate-500 rounded text-slate-400 text-xs"
+                disabled={!playerId}
+                onClick={handleCopyJoinLink}
+              >
+                {copied ? "copied!" : "copy link w/ this id"}
+              </button>
+
               <label className="flex flex-col gap-1">
                 <span className="text-slate-500 text-xs">Nickname</span>
                 <input
-                  className="bg-slate-950 px-2 py-1 border border-slate-700 focus:border-slate-500 rounded outline-none w-40 text-slate-100"
+                  className="bg-slate-950 px-2 py-1 border border-slate-700 focus:border-slate-500 rounded outline-none w-36 text-slate-100"
                   value={nicknameInput}
                   onChange={(e) => setNicknameInput(e.target.value)}
                   placeholder="Player"
@@ -295,12 +365,6 @@ export default function LobbyTestHarness() {
                 onClick={handleJoin}
               >
                 {joining ? "Joining…" : "Join room"}
-              </button>
-              <button
-                className="px-3 py-1.5 border border-slate-700 hover:border-slate-500 rounded text-slate-400 text-xs"
-                onClick={handleForgetIdentity}
-              >
-                Forget stored identity
               </button>
               {joinError && <span className="text-rose-400">{joinError}</span>}
             </div>
@@ -316,8 +380,8 @@ export default function LobbyTestHarness() {
                   )}
                 </div>
                 <div className="text-slate-500 text-xs">
-                  local peerId={short(session?.getLocalPlayer()?.peerId)} playerId=
-                  {short(identity?.playerId)} · host peerId={short(hostPeerId)}
+                  local peerId={short(session.getLocalPlayer()?.peerId)} playerId={short(playerId)}{" "}
+                  · host peerId={short(hostPeerId)}
                 </div>
               </div>
               <button
@@ -330,7 +394,18 @@ export default function LobbyTestHarness() {
           )}
         </section>
 
-        {controller && (
+        {gameSnapshot && (
+          <section className="bg-emerald-950 p-4 border border-emerald-800 rounded">
+            <h2 className="mb-2 text-emerald-400 text-xs uppercase tracking-wide">
+              Game started — connection kept alive, lobby wiring stopped
+            </h2>
+            <pre className="bg-slate-950 p-3 rounded max-h-48 overflow-auto text-slate-400 text-xs">
+              {gameSnapshot}
+            </pre>
+          </section>
+        )}
+
+        {controller && !gameSnapshot && (
           <>
             {/* You */}
             <section className="bg-slate-900 p-4 border border-slate-800 rounded">
@@ -471,16 +546,24 @@ export default function LobbyTestHarness() {
 
             {/* Snapshot / handoff */}
             <section className="bg-slate-900 p-4 border border-slate-800 rounded">
-              <div className="flex justify-between items-center mb-3">
+              <div className="flex flex-wrap justify-between items-center gap-2 mb-3">
                 <h2 className="text-slate-500 text-xs uppercase tracking-wide">
                   Snapshot (lobby → game handoff)
                 </h2>
-                <button
-                  className="px-3 py-1 border border-slate-700 hover:border-slate-500 rounded text-xs"
-                  onClick={handleSnapshot}
-                >
-                  getSnapshot()
-                </button>
+                <div className="flex gap-2">
+                  <button
+                    className="px-3 py-1 border border-slate-700 hover:border-slate-500 rounded text-xs"
+                    onClick={handleSnapshot}
+                  >
+                    getSnapshot()
+                  </button>
+                  <button
+                    className="bg-emerald-700 hover:bg-emerald-600 px-3 py-1 rounded font-semibold text-emerald-50 text-xs"
+                    onClick={handleStartGame}
+                  >
+                    startGame()
+                  </button>
+                </div>
               </div>
               {snapshot && (
                 <pre className="bg-slate-950 p-3 rounded max-h-48 overflow-auto text-slate-400 text-xs">
@@ -488,17 +571,19 @@ export default function LobbyTestHarness() {
                 </pre>
               )}
             </section>
-
-            {/* Log */}
-            <section className="bg-slate-900 p-4 border border-slate-800 rounded">
-              <h2 className="mb-3 text-slate-500 text-xs uppercase tracking-wide">Event log</h2>
-              <div className="space-y-0.5 h-48 overflow-y-auto text-slate-400 text-xs">
-                {logs.map((entry, i) => (
-                  <div key={i}>{entry}</div>
-                ))}
-              </div>
-            </section>
           </>
+        )}
+
+        {/* Log — stays visible even after startGame(), independent of lobby state */}
+        {session && (
+          <section className="bg-slate-900 p-4 border border-slate-800 rounded">
+            <h2 className="mb-3 text-slate-500 text-xs uppercase tracking-wide">Event log</h2>
+            <div className="space-y-0.5 h-48 overflow-y-auto text-slate-400 text-xs">
+              {logs.map((entry, i) => (
+                <div key={i}>{entry}</div>
+              ))}
+            </div>
+          </section>
         )}
       </div>
     </div>

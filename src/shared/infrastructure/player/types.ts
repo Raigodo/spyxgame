@@ -11,9 +11,3 @@ export interface LocalProfileInput {
   nickname: string;
   metadata?: Record<string, unknown>;
 }
-
-export interface StoredIdentity {
-  peerId: string;
-  playerId: string;
-  nickname: string;
-}

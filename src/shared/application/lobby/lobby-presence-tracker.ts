@@ -1,4 +1,4 @@
-import type { PlayerSession } from "@/shared/infrastructure/player";
+import type { PlayerProfile, PlayerSession } from "@/shared/infrastructure/player";
 import type { SignalingPeerId } from "@/shared/infrastructure/signaling";
 import type { RtcPeerStatus } from "@/shared/infrastructure/webrtc";
 
@@ -19,19 +19,25 @@ type PresenceMessage = { __lobbyPresence: true; presence: PresenceMap };
 type RestoreMessage = { __lobbyRestore: true; state: RestoredState };
 
 type ChangeHandler = () => void;
+type DuplicateHandler = () => void;
 
-// Tracks connection status and "have we seen this playerId before" history,
-// and keeps every peer's view of both in sync, despite star topology meaning
-// only the host ever has a real RTC link to more than one other peer.
+// Tracks connection status, "have we seen this playerId before" history, and
+// "is this playerId already live elsewhere right now" duplicate detection.
 //
-// Every peer maintains `history` regardless of role — it's cheap, and it
-// means a peer promoted to host mid-session (after the old host died) isn't
-// starting blank. But only whichever peer *currently is* host acts on it:
-// observes real statuses, decides who's returning, sends them their old
-// ready/team state, and broadcasts the combined picture over the same
-// generic app-message channel LobbyController already uses for mode
-// switches. Everyone else consumes that broadcast, except for their own
-// single real link (to the host), which they read firsthand instead.
+//  - Every peer maintains `history` and does duplicate detection regardless
+//    of role — both are cheap, and it means a peer promoted to host
+//    mid-session isn't starting blank.
+//  - Only whichever peer *currently is* host acts on connection status and
+//    "returning" bookkeeping: observes real RTC statuses, decides who's
+//    returning, sends them their old ready/team state, and broadcasts the
+//    combined picture over the same generic app-message channel
+//    LobbyController uses for mode switches.
+//  - Duplicate-session detection is symmetric and needs no host
+//    involvement: every peer independently compares its own playerId
+//    against everyone else's, using a join-time timestamp frozen in
+//    metadata (sessionStartedAt) to agree, without coordination, on which
+//    of two concurrent sessions for the same playerId is older. The newer
+//    one evicts itself by calling session.leave().
 export class LobbyPresenceTracker {
   private readonly hostStatuses = new Map<SignalingPeerId, RtcPeerStatus>();
   private readonly returningPeerIds = new Set<SignalingPeerId>();
@@ -39,6 +45,7 @@ export class LobbyPresenceTracker {
   private remotePresence: PresenceMap = {};
 
   private readonly changeHandlers = new Set<ChangeHandler>();
+  private readonly duplicateHandlers = new Set<DuplicateHandler>();
   private readonly cleanupFns: Array<() => void> = [];
 
   constructor(private readonly session: PlayerSession) {
@@ -47,19 +54,19 @@ export class LobbyPresenceTracker {
       if (profile.peerId === localPeerId) continue;
       const status = session.getPeerConnectionStatus(profile.peerId);
       if (status) this.hostStatuses.set(profile.peerId, status);
+      this.checkForDuplicateSession(profile);
     }
 
     this.cleanupFns.push(
       session.onPeerConnectionStatusChanged((peer) => {
-        // When we're not host, this event only ever describes our own
-        // guest→host link — that's read firsthand in getPresence(), not
-        // stored here, so it doesn't leak into "status of other guests".
         if (!session.isHost()) return;
         this.hostStatuses.set(peer.signalingPeerId, peer.status);
         this.syncAndBroadcast();
       }),
 
       session.onPlayerJoined((profile) => {
+        this.checkForDuplicateSession(profile);
+
         const playerId = readPlayerId(profile.metadata);
 
         if (session.isHost()) {
@@ -154,7 +161,46 @@ export class LobbyPresenceTracker {
     return () => this.changeHandlers.delete(handler);
   }
 
+  // Fires only on the session that loses the tie-break and is about to call
+  // session.leave() on itself. The winning (older) session is never
+  // notified — nothing changes for it.
+  onDuplicateSessionRejected(handler: DuplicateHandler): () => void {
+    this.duplicateHandlers.add(handler);
+    return () => this.duplicateHandlers.delete(handler);
+  }
+
   // ─── Private ──────────────────────────────────────────────────────────────
+
+  private checkForDuplicateSession(remoteProfile: PlayerProfile): void {
+    const localProfile = this.session.getLocalPlayer();
+    if (!localProfile || remoteProfile.peerId === localProfile.peerId) return;
+
+    const myPlayerId = readPlayerId(localProfile.metadata);
+    const theirPlayerId = readPlayerId(remoteProfile.metadata);
+    if (!myPlayerId || !theirPlayerId || myPlayerId !== theirPlayerId) return;
+
+    const mySessionStart = readSessionStart(localProfile.metadata);
+    const theirSessionStart = readSessionStart(remoteProfile.metadata);
+
+    // The newer session evicts itself; ties (same millisecond) are broken
+    // deterministically so both sides agree without any coordination.
+    const iAmNewer =
+      mySessionStart !== theirSessionStart
+        ? mySessionStart > theirSessionStart
+        : localProfile.peerId > remoteProfile.peerId;
+
+    if (!iAmNewer) return;
+
+    for (const handler of this.duplicateHandlers) handler();
+    this.session
+      .leave()
+      .catch((error) =>
+        console.warn(
+          "[LobbyPresenceTracker] Failed to leave after duplicate-session rejection",
+          error
+        )
+      );
+  }
 
   private syncAndBroadcast(): void {
     const presence: PresenceMap = {};
@@ -173,6 +219,10 @@ export class LobbyPresenceTracker {
 
 function readPlayerId(metadata: Record<string, unknown>): string | undefined {
   return typeof metadata.playerId === "string" ? metadata.playerId : undefined;
+}
+
+function readSessionStart(metadata: Record<string, unknown>): number {
+  return typeof metadata.sessionStartedAt === "number" ? metadata.sessionStartedAt : 0;
 }
 
 function isPresenceMessage(value: unknown): value is PresenceMessage {

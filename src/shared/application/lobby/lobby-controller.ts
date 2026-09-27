@@ -3,7 +3,11 @@ import type { SignalingPeerId } from "@/shared/infrastructure/signaling";
 import { FreeForAllLobbyService } from "./free-for-all-lobby-service";
 import { LobbyRoster } from "./lobby-roster";
 import { TeamLobbyService } from "./team-lobby-service";
-import type { Lobby, LobbyConfig, LobbyMode, LobbyPlayer } from "./types";
+import type { LobbyMode, LobbyPlayer } from "./types";
+
+export type Lobby = FreeForAllLobbyService | TeamLobbyService;
+
+export type LobbyConfig = { mode: "free-for-all" } | { mode: "teams"; teamIds: string[] };
 
 export interface LobbySnapshot {
   mode: LobbyMode;
@@ -18,6 +22,7 @@ type LobbyControlMessage =
   | { __lobbyControl: true; mode: "teams"; teamIds: string[] };
 
 type LobbyChangedHandler = (lobby: Lobby) => void;
+type DuplicateHandler = () => void;
 
 // Single entry point for lobby features on top of an already-joined
 // PlayerSession. Owns which lobby "shape" is currently active and keeps it
@@ -70,6 +75,10 @@ export class LobbyController {
     return () => this.changedHandlers.delete(handler);
   }
 
+  onDuplicateSessionRejected(handler: DuplicateHandler): () => void {
+    return this.roster.onDuplicateSessionRejected(handler);
+  }
+
   switchToFreeForAll(): void {
     this.applyModeSwitch({ mode: "free-for-all" }, true);
   }
@@ -90,6 +99,22 @@ export class LobbyController {
       localPeerId: this.session.getLocalPlayer()?.peerId,
       players: this.lobby.getPlayers(),
     };
+  }
+
+  // Convenience for a "Start" button: snapshot + dispose in one call. Only
+  // ever tears down lobby-local listeners (roster events, presence
+  // tracking, mode-switch control messages) — never the underlying
+  // PlayerSession/WebRtcService connections, which are meant to be reused
+  // as-is by whatever comes next, just with new callbacks attached. Unlike
+  // switchToTeams/switchToFreeForAll, this is NOT host-gated: every peer,
+  // host and guests alike, needs to call this locally when the game
+  // actually begins — it's a per-tab teardown, not a network action, so
+  // coordinating *when* everyone calls it is the app's job, not this
+  // class's.
+  startGame(): LobbySnapshot {
+    const snapshot = this.getSnapshot();
+    this.dispose();
+    return snapshot;
   }
 
   // ─── Private ──────────────────────────────────────────────────────────────

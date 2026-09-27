@@ -3,10 +3,12 @@ import { LobbyPresenceTracker } from "./lobby-presence-tracker";
 import type { LobbyPlayer } from "./types";
 
 type LobbyPlayerHandler = (player: LobbyPlayer) => void;
+type DuplicateHandler = () => void;
 
 export class LobbyRoster {
   private readonly presence: LobbyPresenceTracker;
   private readonly joinedHandlers = new Set<LobbyPlayerHandler>();
+  private readonly rejoinedHandlers = new Set<LobbyPlayerHandler>();
   private readonly updatedHandlers = new Set<LobbyPlayerHandler>();
   private readonly leftHandlers = new Set<LobbyPlayerHandler>();
   private readonly cleanupFns: Array<() => void> = [];
@@ -15,7 +17,15 @@ export class LobbyRoster {
     this.presence = new LobbyPresenceTracker(session);
 
     this.cleanupFns.push(
-      session.onPlayerJoined((p) => this.emit(this.joinedHandlers, p)),
+      // A genuinely new player and a returning one both arrive through
+      // PlayerSession's single onPlayerJoined event — LobbyPresenceTracker
+      // has already decided which, by the time this fires (it subscribes
+      // first, inside its own constructor, above), so we just read that
+      // decision back out and route to the matching handler set.
+      session.onPlayerJoined((p) => {
+        const { returning } = this.presence.getPresence(p.peerId);
+        this.emit(returning ? this.rejoinedHandlers : this.joinedHandlers, p);
+      }),
       session.onPlayerUpdated((p) => this.emit(this.updatedHandlers, p)),
       session.onPlayerLeft((p) => this.emit(this.leftHandlers, p)),
 
@@ -63,6 +73,13 @@ export class LobbyRoster {
     return () => this.joinedHandlers.delete(handler);
   }
 
+  // Fires instead of onPlayerJoined when the arriving peer's playerId
+  // matches someone this lobby has already seen leave during its lifetime.
+  onPlayerRejoined(handler: LobbyPlayerHandler): () => void {
+    this.rejoinedHandlers.add(handler);
+    return () => this.rejoinedHandlers.delete(handler);
+  }
+
   onPlayerUpdated(handler: LobbyPlayerHandler): () => void {
     this.updatedHandlers.add(handler);
     return () => this.updatedHandlers.delete(handler);
@@ -71,6 +88,10 @@ export class LobbyRoster {
   onPlayerLeft(handler: LobbyPlayerHandler): () => void {
     this.leftHandlers.add(handler);
     return () => this.leftHandlers.delete(handler);
+  }
+
+  onDuplicateSessionRejected(handler: DuplicateHandler): () => void {
+    return this.presence.onDuplicateSessionRejected(handler);
   }
 
   private emit(handlers: Set<LobbyPlayerHandler>, profile: PlayerProfile): void {

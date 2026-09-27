@@ -1,4 +1,4 @@
 export { PlayerSession } from "./player-session";
-export type { PlayerProfile, LocalProfileInput, StoredIdentity } from "./types";
-export { loadOrCreateIdentity, saveNickname } from "./player-identity-store";
+export type { PlayerProfile, LocalProfileInput } from "./types";
+export { loadLocalProfile, saveLocalProfile } from "./player-profile-store";
 // PlayerDirectory and the Envelope union stay internal.

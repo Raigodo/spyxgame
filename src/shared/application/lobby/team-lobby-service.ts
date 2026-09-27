@@ -69,6 +69,10 @@ export class TeamLobbyService {
     return this.roster.onPlayerJoined(handler);
   }
 
+  onPlayerRejoined(handler: (player: LobbyPlayer) => void): () => void {
+    return this.roster.onPlayerRejoined(handler);
+  }
+
   onPlayerUpdated(handler: (player: LobbyPlayer) => void): () => void {
     return this.roster.onPlayerUpdated(handler);
   }
