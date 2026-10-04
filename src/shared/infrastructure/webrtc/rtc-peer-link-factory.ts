@@ -31,17 +31,17 @@ export class RtcPeerLinkFactory {
     factory.onIceCandidateCreated((candidate) => {
       if (this.isLeaving()) return;
       console.log(`[RtcPeerLinkFactory] ICE candidate for peer=${short(signalingPeerId)}`);
-      void this.signalingSession.sendIceCandidate(
-        signalingPeerId,
-        candidate,
-        this.isHost() ? "remove" : "do-nothing"
-      );
+      void this.signalingSession
+        .sendIceCandidate(signalingPeerId, candidate, this.isHost() ? "remove" : "do-nothing")
+        .catch(logSendFailure("ICE candidate", signalingPeerId));
     });
 
     factory.onAnswerCreated((answer) => {
       if (this.isLeaving()) return;
       console.log(`[RtcPeerLinkFactory] Answer created for peer=${short(signalingPeerId)}`);
-      void this.signalingSession.sendAnswer(signalingPeerId, answer.sdp!, "do-nothing");
+      void this.signalingSession
+        .sendAnswer(signalingPeerId, answer.sdp!, "do-nothing")
+        .catch(logSendFailure("answer", signalingPeerId));
     });
 
     factory.onConnected((connection) => {
@@ -74,11 +74,9 @@ export class RtcPeerLinkFactory {
     entry.factory.onOfferCreated((offer) => {
       if (this.isLeaving()) return;
       console.log(`[RtcPeerLinkFactory] Offer created for peer=${short(signalingPeerId)}`);
-      void this.signalingSession.sendOffer(
-        signalingPeerId,
-        offer.sdp!,
-        this.isHost() ? "remove" : "do-nothing"
-      );
+      void this.signalingSession
+        .sendOffer(signalingPeerId, offer.sdp!, this.isHost() ? "remove" : "do-nothing")
+        .catch(logSendFailure("offer", signalingPeerId));
     });
 
     await entry.factory.initiateOffer();
@@ -87,4 +85,10 @@ export class RtcPeerLinkFactory {
 
 function short(id: string): string {
   return id.slice(0, 8);
+}
+
+// A peer can leave the room between creating a signal and sending it. That is expected, not an error.
+function logSendFailure(kind: string, peerId: string) {
+  return (error: unknown) =>
+    console.warn(`[RtcPeerLinkFactory] Could not send ${kind} to peer=${short(peerId)}`, error);
 }

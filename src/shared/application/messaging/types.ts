@@ -14,6 +14,8 @@ export interface BusOptions {
   recoveryWindowMs: number;
   /** After a promotion: absolute cap, in case no link ever comes up. */
   recoveryMaxMs: number;
+  /** While a guest is unsynced with an active host link, how often it re-requests snapshots. */
+  resyncIntervalMs: number;
 }
 
 /**

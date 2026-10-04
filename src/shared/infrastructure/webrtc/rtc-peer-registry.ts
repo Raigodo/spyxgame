@@ -68,9 +68,9 @@ export class RtcPeerRegistry {
   }
 
   disposeAndRemoveAll(): void {
-    for (const [signalingPeerId, entry] of this.peers) {
+    for (const [signalingPeerId, entry] of Array.from(this.peers)) {
+      this.peers.delete(signalingPeerId); // first, for the same reason as above
       this.disposeEntry(entry);
-      this.peers.delete(signalingPeerId);
       this.notifyLeft(signalingPeerId, entry);
     }
   }

@@ -1,6 +1,7 @@
 import type { PlayerProfile, PlayerSession } from "@/shared/infrastructure/player";
 import { PlayerReconnectionCoordinator } from "./player-reconnection-coordinator";
 import type { RosterPlayer } from "./types";
+import { RoomBus } from "../messaging";
 
 type RosterPlayerHandler = (player: RosterPlayer) => void;
 type SupersededHandler = () => void;
@@ -20,8 +21,11 @@ export class PlayerPresenceService {
   private readonly leftHandlers = new Set<RosterPlayerHandler>();
   private readonly cleanupFns: Array<() => void> = [];
 
-  constructor(private readonly session: PlayerSession) {
-    this.reconnection = new PlayerReconnectionCoordinator(session);
+  constructor(
+    private readonly session: PlayerSession,
+    bus: RoomBus
+  ) {
+    this.reconnection = new PlayerReconnectionCoordinator(session, bus);
 
     this.cleanupFns.push(
       // A genuinely new player and a returning one both arrive through

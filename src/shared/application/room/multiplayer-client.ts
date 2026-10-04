@@ -245,8 +245,8 @@ export class MultiplayerClient {
   }
 
   private assemble(session: PlayerSession): Parts {
-    const presence = new PlayerPresenceService(session);
     const bus = new RoomBus(createSessionTransport(session));
+    const presence = new PlayerPresenceService(session, bus);
     const roomState = new RoomStateService(bus, this.roomOptions);
     const lobby = new LobbyModule(
       presence,

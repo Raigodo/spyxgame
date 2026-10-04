@@ -297,10 +297,11 @@ export class WebRtcService {
   private handleSignalingPeerLeft(signalingPeerId: SignalingPeerId): void {
     this.reconnectionManager.stopWatchingForOffer(signalingPeerId);
 
-    if (!this.registry.has(signalingPeerId)) return;
-    const entry = this.registry.get(signalingPeerId)!;
-    this.registry.disposeEntry(entry);
+    const entry = this.registry.get(signalingPeerId);
+    if (!entry) return;
+    // Remove first: closing the link below fires "connection died", which must find nothing to reconnect.
     this.registry.remove(signalingPeerId);
+    this.registry.disposeEntry(entry);
   }
 
   // ─── Signal handling ────────────────────────────────────────────────────────

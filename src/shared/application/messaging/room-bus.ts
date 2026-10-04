@@ -25,6 +25,7 @@ const DEFAULT_OPTIONS: BusOptions = {
   commandTtlMs: 30_000,
   recoveryWindowMs: 3_000,
   recoveryMaxMs: 10_000,
+  resyncIntervalMs: 3_000,
 };
 
 const cmp = (a: { epoch: number; rev: number }, b: { epoch: number; rev: number }) =>
@@ -276,6 +277,9 @@ export class RoomBus {
   private readonly statusHandlers = new Set<(status: BusStatus) => void>();
   private readonly cleanups: Array<() => void> = [];
 
+  private lastHostId?: PeerId;
+  private resyncTimer?: ReturnType<typeof setInterval>;
+
   private status: BusStatus = "syncing";
   private started = false;
   private wasHost = false;
@@ -417,15 +421,22 @@ export class RoomBus {
 
   private handleHostChanged(): void {
     const iAmHost = this.transport.isHost();
+    const hostId = this.transport.getHostPeerId();
     const promoted = iAmHost && !this.wasHost;
     const demoted = !iAmHost && this.wasHost;
+    // The host document fires again for the same host (e.g. a repeated election write).
+    // That must not discard state we already synced.
+    const hostMoved = hostId !== this.lastHostId;
     this.wasHost = iAmHost;
+    this.lastHostId = hostId;
 
     if (demoted) this.endRecovery();
     if (promoted) this.beginRecovery();
     if (!iAmHost) {
-      for (const channel of this.stateChannels.values()) channel.markUnsynced();
-      this.queue.resetRouting();
+      if (hostMoved || demoted) {
+        for (const channel of this.stateChannels.values()) channel.markUnsynced();
+        this.queue.resetRouting();
+      }
       this.syncWithHost();
     }
     this.flushQueue();
@@ -442,13 +453,46 @@ export class RoomBus {
     this.refreshStatus();
   }
 
-  /** Guest, link to host is up: offer our copies (matters after a promotion), flush commands. */
+  /** Guest, link to host is up: offer our copies (matters after a promotion), ask for what we lack, flush commands. */
   private syncWithHost(): void {
     const hostId = this.transport.getHostPeerId();
     if (!hostId || this.transport.isHost() || !this.transport.isLinkActive(hostId)) return;
     const channels = Array.from(this.stateChannels.values(), (c) => c.copy());
     this.transport.send(hostId, { __bus: 1, kind: "offer", channels });
+    this.requestMissingSnapshots(hostId);
     this.flushQueue();
+  }
+
+  // The host replies once it has finished recovery, so this is safe to repeat.
+  private requestMissingSnapshots(hostId: PeerId): void {
+    for (const channel of this.stateChannels.values()) {
+      if (!channel.isSynced())
+        this.transport.send(hostId, { __bus: 1, kind: "sync", ch: channel.id });
+    }
+  }
+
+  // Retries snapshot requests while this guest is unsynced with a live host link, so a
+  // snapshot lost or discarded around a host change can never leave it stuck.
+  private updateResync(): void {
+    const hostId = this.transport.getHostPeerId();
+    const needed =
+      this.started &&
+      !this.transport.isHost() &&
+      !!hostId &&
+      this.transport.isLinkActive(hostId) &&
+      Array.from(this.stateChannels.values()).some((c) => !c.isSynced());
+
+    if (needed && !this.resyncTimer) {
+      this.resyncTimer = setInterval(() => {
+        const current = this.transport.getHostPeerId();
+        if (current && !this.transport.isHost() && this.transport.isLinkActive(current)) {
+          this.requestMissingSnapshots(current);
+        }
+      }, this.options.resyncIntervalMs);
+    } else if (!needed && this.resyncTimer) {
+      clearInterval(this.resyncTimer);
+      this.resyncTimer = undefined;
+    }
   }
 
   private flushQueue(): void {
@@ -497,6 +541,8 @@ export class RoomBus {
 
   private beginRecovery(): void {
     this.endRecovery();
+    clearInterval(this.resyncTimer);
+    this.resyncTimer = undefined;
     this.recovery = {
       best: new Map(),
       offeredBy: new Set(),
@@ -568,6 +614,7 @@ export class RoomBus {
   }
 
   private refreshStatus(): void {
+    this.updateResync();
     const next = this.computeStatus();
     if (next === this.status) return;
     this.status = next;
