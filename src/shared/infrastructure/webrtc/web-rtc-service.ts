@@ -33,6 +33,7 @@ export class WebRtcService {
   private isHostRole = false;
   private joined = false;
   private currentHostPeerId?: SignalingPeerId;
+  private leavePromise?: Promise<void>;
 
   private readonly linkFactory: RtcPeerLinkFactory;
   private readonly reconnectionManager: RtcReconnectionManager;
@@ -70,7 +71,12 @@ export class WebRtcService {
     this.isHostRole = false;
 
     console.log(`[WebRtcService] Joining room=${roomId}`);
-    await this.session.joinRoom(roomId, peerId);
+    try {
+      await this.session.joinRoom(roomId, peerId);
+    } catch (error) {
+      this.joined = false;
+      throw error;
+    }
 
     this.reconnectionManager.start();
 
@@ -116,7 +122,15 @@ export class WebRtcService {
     }
   }
 
-  async leaveRoom(): Promise<void> {
+  leaveRoom(): Promise<void> {
+    if (!this.joined) return Promise.resolve();
+    this.leavePromise ??= this.doLeave().finally(() => {
+      this.leavePromise = undefined;
+    });
+    return this.leavePromise;
+  }
+
+  async doLeave(): Promise<void> {
     if (!this.joined) return;
 
     this.leaving = true;
@@ -158,28 +172,25 @@ export class WebRtcService {
 
   sendMessageToPeer(signalingPeerId: SignalingPeerId, message: string): void {
     const entry = this.registry.get(signalingPeerId);
-    if (!entry) {
-      console.warn(`[WebRtcService] No peer for signalingPeerId=${short(signalingPeerId)}`);
+    if (!entry || entry.status !== "active" || !entry.connection) {
+      console.warn(`[WebRtcService] Peer=${short(signalingPeerId)} not active, dropping message`);
       return;
     }
-    if (entry.status !== "active" || !entry.connection) {
-      console.warn(
-        `[WebRtcService] Peer=${short(signalingPeerId)} not active (status=${entry.status})`
-      );
-      return;
+    try {
+      entry.connection.send(message);
+    } catch (error) {
+      console.warn(`[WebRtcService] Send failed to peer=${short(signalingPeerId)}`, error);
     }
-    entry.connection.send(message);
   }
 
   broadcastMessage(message: string): void {
     for (const [signalingPeerId, entry] of this.registry.entries()) {
-      if (entry.status !== "active" || !entry.connection) {
-        console.warn(
-          `[WebRtcService] Skipping broadcast to peer=${short(signalingPeerId)}, status=${entry.status}`
-        );
-        continue;
+      if (entry.status !== "active" || !entry.connection) continue;
+      try {
+        entry.connection.send(message);
+      } catch (error) {
+        console.warn(`[WebRtcService] Broadcast failed to peer=${short(signalingPeerId)}`, error);
       }
-      entry.connection.send(message);
     }
   }
 

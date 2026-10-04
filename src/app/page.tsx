@@ -1,13 +1,5 @@
-import LobbyTestHarness from "@/shared/presentation/LobbyTest";
-
-interface HomeProps {
-  searchParams: Promise<{
-    isHost?: string;
-  }>;
+function page() {
+  return <>Welcome</>;
 }
 
-export default async function Home({ searchParams }: HomeProps) {
-  const params = await searchParams;
-
-  return <LobbyTestHarness />;
-}
+export default page;

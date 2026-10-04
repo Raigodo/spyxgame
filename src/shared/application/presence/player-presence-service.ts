@@ -92,11 +92,11 @@ export class PlayerPresenceService {
     this.session.updateLocalProfile({ nickname });
   }
 
-  // Shallow-merges into the local player's metadata bag (see
-  // PlayerSession.updateLocalProfile). Whatever's in here also becomes what
-  // gets restored automatically if this player disconnects and rejoins
-  // later — in the lobby or mid-game, it makes no difference to this layer.
   setLocalMetadata(metadata: Record<string, unknown>): void {
+    if (this.reconnection.isLocalPending()) {
+      console.warn("[PlayerPresenceService] Ignoring metadata change while reconnecting");
+      return;
+    }
     this.session.updateLocalProfile({ metadata });
   }
 
@@ -144,5 +144,14 @@ export class PlayerPresenceService {
       connectionStatus: presence.status,
       returning: presence.returning,
     };
+  }
+
+  isLocalPending(): boolean {
+    return this.reconnection.isLocalPending();
+  }
+
+  // Fires whenever presence data changes, including pending → ready.
+  onPresenceChanged(handler: () => void): () => void {
+    return this.reconnection.onChanged(handler);
   }
 }

@@ -136,6 +136,23 @@ export class PlayerReconnectionCoordinator {
           this.history.set(playerId, { ...profile.metadata });
         }
 
+        // Refresh case: the ghost (old peer) leaves while its replacement is
+        // already in the room. The join-time restore found nothing in `history`
+        // back then, so hand the ghost's metadata to the survivor now. Must run
+        // BEFORE resolveActiveDuplicate, which fires the reveal that decides
+        // joined-vs-rejoined from `returning`.
+        if (session.isHost() && playerId) {
+          const survivor = this.findSurvivorReplacing(profile.peerId);
+          if (survivor) {
+            this.returningPeerIds.add(survivor);
+            const restore: RestoreMessage = {
+              __presenceRestore: true,
+              metadata: { ...profile.metadata },
+            };
+            this.session.sendToPlayer(survivor, restore);
+          }
+        }
+
         this.resolveActiveDuplicate(profile.peerId);
 
         if (session.isHost()) {
@@ -238,6 +255,22 @@ export class PlayerReconnectionCoordinator {
   isHiddenDuringArbitration(peerId: SignalingPeerId): boolean {
     for (const duplicate of this.activeDuplicates.values()) {
       if (duplicate.newPeerId === peerId) return true;
+    }
+    return false;
+  }
+
+  // True while the local (guest) peer is still being acknowledged by the host
+  // or is the newcomer in a duplicate-session arbitration. Local state-changing
+  // actions should wait until this is false, so a pending restore can never
+  // overwrite something the user just did.
+  isLocalPending(): boolean {
+    if (this.session.isHost()) return false;
+    const localPeerId = this.session.getLocalPlayer()?.peerId;
+    if (!localPeerId) return false;
+
+    if (this.remotePresence[localPeerId] === undefined) return true; // host hasn't acknowledged us yet
+    for (const duplicate of this.activeDuplicates.values()) {
+      if (duplicate.newPeerId === localPeerId) return true;
     }
     return false;
   }
@@ -408,6 +441,17 @@ export class PlayerReconnectionCoordinator {
 
   private emitChanged(): void {
     for (const handler of this.changeHandlers) handler();
+  }
+
+  // The newcomer's peerId if `departedPeerId` was the old side of a disputed
+  // pair and the newcomer is still in the room.
+  private findSurvivorReplacing(departedPeerId: SignalingPeerId): SignalingPeerId | undefined {
+    for (const duplicate of this.activeDuplicates.values()) {
+      if (duplicate.oldPeerId !== departedPeerId) continue;
+      const stillThere = this.session.getPlayers().some((p) => p.peerId === duplicate.newPeerId);
+      return stillThere ? duplicate.newPeerId : undefined;
+    }
+    return undefined;
   }
 }
 

@@ -1,3 +1,5 @@
+//webrtc/types
+
 import { SignalingPeerId } from "../signaling";
 import { ActiveRtcConnection } from "./active-rtc-connection";
 import { RtcConnectionFactory } from "./rtc-connection-factory";

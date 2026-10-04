@@ -1,3 +1,5 @@
+//presence/types.ts
+
 import type { SignalingPeerId } from "@/shared/infrastructure/signaling";
 import type { RtcPeerStatus } from "@/shared/infrastructure/webrtc";
 

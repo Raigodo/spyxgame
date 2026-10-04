@@ -19,6 +19,7 @@ type Envelope =
 
 type AppMessageHandler = (payload: unknown, from: SignalingPeerId) => void;
 type PlayerHandler = (player: PlayerProfile) => void;
+type HostChangedHandler = (hostPeerId: SignalingPeerId | undefined) => void;
 
 export class PlayerSession {
   private readonly messenger: ChunkedMessenger;
@@ -66,8 +67,8 @@ export class PlayerSession {
 
   // Forcibly removes another player. Host-only. Purely mechanical — sends no
   // notice to the removed player. Callers that want the removed player to
-  // get a chance to clean up gracefully (like the lobby's arbitration below)
-  // should message them first.
+  // get a chance to clean up gracefully (like the presence layer's
+  // arbitration) should message them first.
   async hostRemovePeer(peerId: SignalingPeerId): Promise<void> {
     if (!this.isHost()) {
       throw new Error("[PlayerSession] Only the host can remove another player.");
@@ -85,6 +86,19 @@ export class PlayerSession {
 
   getHostPeerId(): SignalingPeerId | undefined {
     return this.rtc.getHostPeerId();
+  }
+
+  /** Peer ids with an RTC entry, in any status. Host side: who should offer after promotion. */
+  getPeerIds(): SignalingPeerId[] {
+    return this.rtc.getPeers().map((p) => p.signalingPeerId);
+  }
+
+  // Fires whenever the host changes (elected, re-elected, or cleared). Lets
+  // consumers react to host/role changes instead of polling isHost() /
+  // getHostPeerId(). Underlying event already existed on WebRtcService —
+  // this just re-exposes it at the layer everything else talks to.
+  onHostChanged(handler: HostChangedHandler): () => void {
+    return this.rtc.onHostChanged(handler);
   }
 
   // Shallow-merges metadata so games can update one field (e.g. `ready`)
@@ -268,6 +282,9 @@ export class PlayerSession {
       envelope = this.stampVerifiedSender(envelope, from);
     }
 
+    // Relay the stamped envelope: guests must see the host-verified `from`.
+    const relayed = this.rtc.isHost() ? JSON.stringify(envelope) : raw;
+
     switch (envelope.kind) {
       case "profile": {
         if (!this.rtc.isHost()) return; // only the host aggregates profiles
@@ -285,14 +302,14 @@ export class PlayerSession {
           if (this.rtc.isHost()) {
             for (const peer of this.rtc.getPeers()) {
               if (peer.status !== "active" || peer.signalingPeerId === envelope.from) continue;
-              this.messenger.sendToPeer(peer.signalingPeerId, raw);
+              this.messenger.sendToPeer(peer.signalingPeerId, relayed); // broadcast relay
             }
           }
           this.emitApp(envelope.payload, envelope.from);
         } else if (envelope.to === this.rtc.getLocalPeerId()) {
           this.emitApp(envelope.payload, envelope.from);
         } else if (this.rtc.isHost()) {
-          this.messenger.sendToPeer(envelope.to, raw);
+          this.messenger.sendToPeer(envelope.to, relayed); // direct relay
         }
         break;
       }
