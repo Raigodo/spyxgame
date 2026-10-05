@@ -16,7 +16,8 @@ export class RtcReconnectionManager {
     private readonly linkFactory: RtcPeerLinkFactory,
     private readonly getHostElection: () => HostElectionService,
     private readonly isHost: () => boolean,
-    private readonly isLeaving: () => boolean
+    private readonly isLeaving: () => boolean,
+    private readonly getHostPeerId: () => SignalingPeerId | undefined
   ) {}
 
   start(): void {
@@ -53,6 +54,14 @@ export class RtcReconnectionManager {
     const entry = this.registry.get(signalingPeerId);
     if (!entry) return;
 
+    // A guest has one link that matters: the one to the host. A dead link to anyone else is a stale
+    // leftover (e.g. the previous host after a handoff) and must never be read as a dead host.
+    if (!this.isHost() && signalingPeerId !== this.getHostPeerId()) {
+      console.log(`[RtcReconnectionManager] Dropping stale link to peer=${short(signalingPeerId)}`);
+      this.registry.discard(signalingPeerId);
+      return;
+    }
+
     console.warn(`[RtcReconnectionManager] Connection died for peer=${short(signalingPeerId)}`);
     this.registry.disposeEntry(entry);
 
@@ -78,6 +87,8 @@ export class RtcReconnectionManager {
       this.offerWatches.delete(hostPeerId);
 
       if (this.isLeaving() || this.isHost()) return;
+
+      if (this.getHostPeerId() !== hostPeerId) return; // the host moved on since this watch started
 
       const entry = this.registry.get(hostPeerId);
       if (entry?.status === "active") return;
@@ -109,6 +120,14 @@ export class RtcReconnectionManager {
   // ─── Shared ─────────────────────────────────────────────────────────────
 
   suspectHostDead(deadHostPeerId: SignalingPeerId): void {
+    // Only the current host's death is ever a reason to elect. Reporting anyone else removes a live
+    // peer from the room.
+    if (deadHostPeerId !== this.getHostPeerId()) {
+      console.log(
+        `[RtcReconnectionManager] Ignoring suspicion about peer=${short(deadHostPeerId)}: not the current host`
+      );
+      return;
+    }
     console.log(`[RtcReconnectionManager] Suspecting host=${short(deadHostPeerId)} is dead`);
     this.getHostElection().reportSuspectedDeath(deadHostPeerId);
   }
@@ -147,8 +166,12 @@ export class RtcReconnectionManager {
       console.warn(
         `[RtcReconnectionManager] No offer received from peer=${short(signalingPeerId)} — removing entry`
       );
-      this.registry.disposeEntry(current);
-      this.registry.remove(signalingPeerId);
+      if (signalingPeerId === this.getHostPeerId()) {
+        this.registry.disposeEntry(current);
+        this.registry.remove(signalingPeerId);
+      } else {
+        this.registry.discard(signalingPeerId); // the host moved on: silent, the peer is still in the room
+      }
     }, RECONNECT_TIMEOUT_MS);
   }
 }

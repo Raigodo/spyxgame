@@ -3,7 +3,7 @@ import { PlayerDirectory } from "./player-directory";
 import { WebRtcService } from "../webrtc/web-rtc-service";
 import { RoomId, SignalingPeerId } from "../signaling";
 import type { LocalProfileInput, PlayerProfile } from "./types";
-import { RtcPeer, RtcPeerStatus } from "../webrtc/types";
+import { HostTransferResult, RtcPeer, RtcPeerStatus } from "../webrtc/types";
 
 type Envelope =
   | { kind: "profile"; profile: PlayerProfile }
@@ -35,11 +35,15 @@ export class PlayerSession {
 
   // ─── Public API ───────────────────────────────────────────────────────────
 
-  async join(roomId: RoomId, profile: LocalProfileInput, peerId?: SignalingPeerId): Promise<void> {
+  async join(
+    roomId: RoomId,
+    profile: LocalProfileInput,
+    options: { peerId?: SignalingPeerId; formerHostPeerId?: SignalingPeerId } = {}
+  ): Promise<void> {
     this.messenger.start();
     this.wireListeners(); // subscribe before joinRoom — avoids missing early events
 
-    await this.rtc.joinRoom(roomId, peerId);
+    await this.rtc.joinRoom(roomId, options.peerId, { formerHostPeerId: options.formerHostPeerId });
 
     this.localProfile = {
       peerId: this.rtc.getLocalPeerId()!,
@@ -74,6 +78,11 @@ export class PlayerSession {
       throw new Error("[PlayerSession] Only the host can remove another player.");
     }
     await this.rtc.removePeer(peerId);
+  }
+
+  /** Host only. Hands the host role to `peerId`, which must have an active link. */
+  transferHost(peerId: SignalingPeerId): Promise<HostTransferResult> {
+    return this.rtc.transferHost(peerId);
   }
 
   getLocalPlayer(): PlayerProfile | undefined {

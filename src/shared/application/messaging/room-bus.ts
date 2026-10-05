@@ -397,6 +397,11 @@ export class RoomBus {
         if (this.recovery) this.recovery.held.push({ w, from });
         else this.processRemoteCommand(w, from);
         break;
+      case "recover":
+        // The new host asks for our copies. (The mirror image of guests offering on link-up:
+        // between the two, an offer that arrives before the host knows it is host is never lost.)
+        if (!iAmHost && from === hostId) this.syncWithHost();
+        break;
     }
   }
 
@@ -549,6 +554,7 @@ export class RoomBus {
       held: [],
       maxTimer: setTimeout(() => this.finishRecovery(), this.options.recoveryMaxMs),
     };
+    this.transport.broadcast({ __bus: 1, kind: "recover" });
     this.checkRecoveryComplete();
   }
 

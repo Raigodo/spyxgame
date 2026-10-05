@@ -8,11 +8,14 @@ import {
 import { RtcPeerLinkFactory } from "./rtc-peer-link-factory";
 import { RtcPeerRegistry } from "./rtc-peer-registry";
 import { RtcReconnectionManager } from "./rtc-reconnection-manager";
-import { RtcPeer } from "./types";
+import { HostTransferResult, RtcPeer } from "./types";
 
 type RtcPeerHandler = (peer: RtcPeer) => void;
 type RtcMessageHandler = (message: string, from: SignalingPeerId) => void;
 type HostChangedHandler = (hostPeerId: SignalingPeerId | undefined) => void;
+
+// How long a returning host keeps trying to take its seat back (covers slow failure detection).
+const RECLAIM_WINDOW_MS = 10_000;
 
 type SignalingPayload =
   | { type: "offer"; sdp: string }
@@ -37,6 +40,7 @@ export class WebRtcService {
 
   private readonly linkFactory: RtcPeerLinkFactory;
   private readonly reconnectionManager: RtcReconnectionManager;
+  private reclaim?: { former: SignalingPeerId; stop: () => void };
 
   constructor() {
     this.linkFactory = new RtcPeerLinkFactory(
@@ -57,13 +61,18 @@ export class WebRtcService {
       this.linkFactory,
       () => this.session.host,
       () => this.isHostRole,
-      () => this.leaving
+      () => this.leaving,
+      () => this.currentHostPeerId
     );
   }
 
   // ─── Public API ───────────────────────────────────────────────────────────
 
-  async joinRoom(roomId: RoomId, peerId?: SignalingPeerId): Promise<void> {
+  async joinRoom(
+    roomId: RoomId,
+    peerId?: SignalingPeerId,
+    options: { formerHostPeerId?: SignalingPeerId } = {}
+  ): Promise<void> {
     if (this.joined) {
       throw new Error("[WebRtcService] Already joined a room.");
     }
@@ -120,6 +129,11 @@ export class WebRtcService {
       console.log(`[WebRtcService] Host already exists: ${short(currentHost.signalingPeerId)}`);
       await this.handleHostChanged(currentHost);
     }
+
+    // A refreshed host: its previous incarnation is still named in the host document.
+    if (currentHost && options.formerHostPeerId === currentHost.signalingPeerId) {
+      this.startReclaim(options.formerHostPeerId);
+    }
   }
 
   leaveRoom(): Promise<void> {
@@ -131,6 +145,7 @@ export class WebRtcService {
   }
 
   async doLeave(): Promise<void> {
+    this.reclaim?.stop();
     if (!this.joined) return;
 
     this.leaving = true;
@@ -152,6 +167,23 @@ export class WebRtcService {
 
   async removePeer(signalingPeerId: SignalingPeerId): Promise<void> {
     await this.session.removePeer(signalingPeerId);
+  }
+
+  // Host only. Hands the host role to a peer we have an active link to. One atomic write: it
+  // succeeds only while the host document still names us. Everyone then follows the normal
+  // role change; the new host recovers state from the guests (including us, now a guest).
+  async transferHost(targetPeerId: SignalingPeerId): Promise<HostTransferResult> {
+    if (!this.isHostRole || this.leaving) return "not-host";
+    const entry = this.registry.get(targetPeerId);
+    if (
+      targetPeerId === this.session.peerId ||
+      !entry ||
+      entry.status !== "active" ||
+      !entry.connection
+    ) {
+      return "target-unavailable";
+    }
+    return (await this.session.host.transferHost(targetPeerId)) ? "transferred" : "host-changed";
   }
 
   getPeers(): RtcPeer[] {
@@ -224,12 +256,65 @@ export class WebRtcService {
 
   // ─── Host role ────────────────────────────────────────────────────────────
 
+  // A refreshed host returns with a fresh peerId. While the host document still names its previous
+  // incarnation, take the seat back as soon as that peer is gone from the room (the guests remove it
+  // once they notice its link died). If the document names anyone else first, the window is over.
+  private startReclaim(former: SignalingPeerId): void {
+    this.reclaim?.stop();
+
+    let done = false;
+    let busy = false;
+    let retry = false;
+
+    const stop = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      offLeft();
+      if (this.reclaim?.former === former) this.reclaim = undefined;
+    };
+
+    const attempt = async (final: boolean): Promise<void> => {
+      if (done) return;
+      if (busy) {
+        retry = true;
+        return;
+      }
+      busy = true;
+      try {
+        const result = await this.session.host.claimHost(former);
+        console.log(`[WebRtcService] Host reclaim: ${result}`);
+        if (result !== "former-present" || final) stop();
+      } catch (error) {
+        console.warn("[WebRtcService] Host reclaim failed", error);
+        stop();
+      } finally {
+        busy = false;
+        if (retry && !done) {
+          retry = false;
+          void attempt(final);
+        }
+      }
+    };
+
+    const offLeft = this.session.onPeerLeft((peer) => {
+      if (peer.peerId === former) void attempt(false);
+    });
+    const timer = setTimeout(() => void attempt(true), RECLAIM_WINDOW_MS);
+    this.reclaim = { former, stop };
+    void attempt(false);
+  }
+
   private async handleHostChanged(
     host: { signalingPeerId: SignalingPeerId } | null
   ): Promise<void> {
     if (this.leaving) return;
 
+    // The seat went to someone else (or was cleared): the reclaim window is over.
+    if (this.reclaim && host?.signalingPeerId !== this.reclaim.former) this.reclaim.stop();
+
     if (!host) {
+      this.reconnectionManager.clearAllOfferWatches();
       this.currentHostPeerId = undefined;
       for (const handler of this.hostChangedHandlers) handler(undefined);
       console.log("[WebRtcService] Host document cleared — triggering election");
@@ -238,6 +323,10 @@ export class WebRtcService {
     }
 
     this.currentHostPeerId = host.signalingPeerId;
+
+    // Offer watches belong to one specific host. A stale one firing after the host has moved on would
+    // report a live peer as dead.
+    this.reconnectionManager.clearAllOfferWatches();
 
     const localPeerId = this.session.peerId;
     const iAmHost = host.signalingPeerId === localPeerId;
@@ -262,9 +351,8 @@ export class WebRtcService {
     this.isHostRole = isHost;
 
     if (!isHost) {
-      console.log("[WebRtcService] Became guest — disposing all peer entries");
-      this.registry.disposeAndRemoveAll();
-      return;
+      console.log("[WebRtcService] Became guest");
+      return; // handleHostChanged drops links to everyone except the new host
     }
 
     console.log("[WebRtcService] Became host — connecting to unconnected peers");

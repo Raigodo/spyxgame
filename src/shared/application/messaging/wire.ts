@@ -26,7 +26,8 @@ export type Wire =
       payload: unknown;
     }
   | { __bus: 1; kind: "ack"; id: string; result: CommandResult }
-  | { __bus: 1; kind: "event"; ch: string; event: unknown };
+  | { __bus: 1; kind: "event"; ch: string; event: unknown }
+  | { __bus: 1; kind: "recover" };
 
 const isRec = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
 const isInt = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v);
@@ -88,6 +89,8 @@ export function parseWire(v: unknown): Wire | undefined {
       return typeof v.ch === "string"
         ? { __bus: 1, kind: "event", ch: v.ch, event: v.event }
         : undefined;
+    case "recover":
+      return { __bus: 1, kind: "recover" };
     default:
       return undefined;
   }

@@ -4,7 +4,14 @@
 // Getters are safe to call in any state, and return referentially stable
 // values between changes, so they can back a useSyncExternalStore directly.
 
-import { PlayerSession, loadLocalProfile, saveLocalProfile } from "@/shared/infrastructure/player";
+import {
+  PlayerSession,
+  forgetHostPeer,
+  loadLocalProfile,
+  recallHostPeer,
+  rememberHostPeer,
+  saveLocalProfile,
+} from "@/shared/infrastructure/player";
 import { WebRtcService } from "@/shared/infrastructure/webrtc";
 import type { SignalingPeerId } from "@/shared/infrastructure/signaling";
 import { PlayerPresenceService } from "@/shared/application/presence";
@@ -37,7 +44,7 @@ import {
   type SlotValue,
 } from "@/shared/application/game";
 
-export type ClientStatus = "idle" | "joining" | "syncing" | "ready" | "superseded";
+export type ClientStatus = "idle" | "joining" | "syncing" | "ready" | "superseded" | "kicked";
 
 export interface JoinOptions {
   roomId: string;
@@ -91,7 +98,7 @@ export interface LobbyInfo {
   allReady: boolean;
 }
 
-type Lifecycle = "idle" | "joining" | "joined" | "superseded";
+type Lifecycle = "idle" | "joining" | "joined" | "superseded" | "kicked";
 
 interface Parts {
   session: PlayerSession;
@@ -153,6 +160,7 @@ export class MultiplayerClient {
   private readonly pendingEm = new Emitter<[boolean]>();
   private readonly playerIdEm = new Emitter<[JoinResult]>();
   private readonly supersededEm = new Emitter<[]>();
+  private readonly kickedEm = new Emitter<[]>();
   private readonly joinedEm = new Emitter<[LobbyPlayer]>();
   private readonly rejoinedEm = new Emitter<[LobbyPlayer]>();
   private readonly updatedEm = new Emitter<[LobbyPlayer]>();
@@ -200,6 +208,7 @@ export class MultiplayerClient {
   /** Idempotent. Safe to call after a failed join, during a join, or twice. */
   async leave(): Promise<void> {
     await this.inFlightJoin; // let a pending join settle, then tear it down properly
+    if (this.roomId) forgetHostPeer(this.roomId); // a deliberate leave never reclaims
     await this.teardown();
     this.lifecycle = "idle";
     this.roomId = undefined;
@@ -220,7 +229,10 @@ export class MultiplayerClient {
     const session = new PlayerSession(new WebRtcService());
     let parts: Parts | undefined;
     try {
-      await session.join(options.roomId, buildLocalProfileInput(playerId, nickname));
+      const formerHostPeerId = recallHostPeer(options.roomId, playerId);
+      await session.join(options.roomId, buildLocalProfileInput(playerId, nickname), {
+        formerHostPeerId,
+      });
 
       parts = this.assemble(session);
       this.parts = parts; // before start(): handlers fired by start() already see it
@@ -307,6 +319,11 @@ export class MultiplayerClient {
       roomState.onChange((next, prev) => this.handleRoomStateChanged(next, prev)),
 
       session.onHostChanged((hostPeerId) => {
+        // Remember the seat so a page refresh can take it back (WebRtcService.startReclaim).
+        const localPeerId = session.getLocalPlayer()?.peerId;
+        if (session.isHost() && localPeerId && this.roomId) {
+          rememberHostPeer(this.roomId, playerId, localPeerId);
+        }
         this.hostEm.emit(hostPeerId);
         this.syncDerived();
         parts.hostRuntime.reconcile();
@@ -321,6 +338,7 @@ export class MultiplayerClient {
 
       presence.onPresenceChanged(() => this.refreshPending()),
       presence.onSessionSuperseded(() => this.handleSuperseded()),
+      presence.onKicked(() => this.handleKicked()),
 
       // Nickname persistence is the client's job, not the UI's.
       session.onPlayerUpdated((p) => {
@@ -345,8 +363,17 @@ export class MultiplayerClient {
   }
 
   private handleSuperseded(): void {
+    if (this.roomId) forgetHostPeer(this.roomId);
     this.lifecycle = "superseded";
     this.supersededEm.emit();
+    this.syncDerived();
+    void this.teardown().then(() => this.syncDerived());
+  }
+
+  private handleKicked(): void {
+    if (this.roomId) forgetHostPeer(this.roomId);
+    this.lifecycle = "kicked";
+    this.kickedEm.emit();
     this.syncDerived();
     void this.teardown().then(() => this.syncDerived());
   }
@@ -473,6 +500,11 @@ export class MultiplayerClient {
     return this.supersededEm.on(handler);
   }
 
+  /** The host removed this player from the room. The client has already left. */
+  onKicked(handler: () => void): () => void {
+    return this.kickedEm.on(handler);
+  }
+
   onPlayerJoined(handler: (player: LobbyPlayer) => void): () => void {
     return this.joinedEm.on(handler);
   }
@@ -557,6 +589,35 @@ export class MultiplayerClient {
     config: C
   ): Promise<CommandResult> {
     return this.startGameById(game.id, config);
+  }
+
+  /**
+   * Host only. Hands the host role to another connected player; the room and any running game
+   * carry on. Rejected reasons: not-host, not-ready (the room is re-syncing), unknown-player,
+   * target-unavailable (no active link yet), host-changed (someone else became host first).
+   */
+  async transferHost(peerId: SignalingPeerId): Promise<CommandResult> {
+    const parts = this.parts;
+    if (!parts) return NOT_JOINED;
+    const reject = (reason: string): CommandResult => ({ ok: false, kind: "rejected", reason });
+
+    if (!parts.session.isHost()) return reject("not-host");
+    if (parts.bus.getStatus() !== "ready") return reject("not-ready");
+    if (peerId === this.getLocalPeerId() || !this.players.some((p) => p.peerId === peerId)) {
+      return reject("unknown-player");
+    }
+    const result = await parts.session.transferHost(peerId);
+    return result === "transferred" ? { ok: true } : reject(result);
+  }
+
+  /** Host only. Removes a player from the room; they are told why. They may rejoin through the invite link. */
+  async kickPlayer(peerId: SignalingPeerId): Promise<CommandResult> {
+    const parts = this.parts;
+    if (!parts) return NOT_JOINED;
+    const reject = (reason: string): CommandResult => ({ ok: false, kind: "rejected", reason });
+    if (!parts.session.isHost()) return reject("not-host");
+    if (peerId === this.getLocalPeerId()) return reject("cannot-kick-self");
+    return parts.presence.kickPlayer(peerId) ? { ok: true } : reject("unknown-player");
   }
 
   private startGameById(gameId: string, config: unknown): Promise<CommandResult> {
@@ -657,6 +718,8 @@ export class MultiplayerClient {
         return "joining";
       case "superseded":
         return "superseded";
+      case "kicked":
+        return "kicked";
       case "joined":
         return this.parts?.bus.getStatus() ?? "syncing";
     }

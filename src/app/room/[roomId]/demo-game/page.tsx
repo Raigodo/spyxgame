@@ -128,6 +128,29 @@ export default function DemoGamePage() {
           ))}
         </section>
 
+        {isHost && (
+          <section className="flex flex-wrap items-center gap-2 text-xs">
+            <span className="text-slate-500">Hand host to:</span>
+            {players
+              .filter(
+                (p) => p.peerId !== client.getLocalPeerId() && p.connectionStatus === "active"
+              )
+              .map((p) => (
+                <button
+                  key={p.peerId}
+                  className="px-2 py-0.5 border border-slate-700 rounded"
+                  onClick={() =>
+                    void client
+                      .transferHost(p.peerId)
+                      .then((r) => setNotice(r.ok ? null : `Rejected: ${r.reason}`))
+                  }
+                >
+                  {p.nickname}
+                </button>
+              ))}
+          </section>
+        )}
+
         {emotes.length > 0 && (
           <p className="text-slate-400 text-xs">
             {emotes.map((e) => `${nameOfPeer(e.fromPeerId)} ${e.emoji}`).join("  ·  ")}

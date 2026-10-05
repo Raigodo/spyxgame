@@ -185,8 +185,10 @@ export default function LobbyPage() {
                 <th>ready</th>
                 <th>team</th>
                 <th>status</th>
+                <th>action</th>
               </tr>
             </thead>
+
             <tbody>
               {players.map((p) => (
                 <tr key={p.peerId} className="border-slate-800 border-t">
@@ -197,12 +199,38 @@ export default function LobbyPage() {
                       <span className="text-indigo-400"> (host)</span>
                     )}
                   </td>
+
                   <td>{p.ready ? "✓" : "—"}</td>
+
                   <td>{p.teamId ?? "—"}</td>
+
                   <td>
                     <span className={`rounded px-1.5 py-0.5 ${statusStyles(p.connectionStatus)}`}>
                       {p.connectionStatus}
                     </span>
+                  </td>
+
+                  <td>
+                    {isHost && p.peerId !== localPeerId && p.connectionStatus === "active" && (
+                      <button
+                        className="px-2 py-0.5 border border-slate-700 rounded text-xs"
+                        onClick={() => void client.transferHost(p.peerId).then(report)}
+                      >
+                        Make host
+                      </button>
+                    )}
+                    {isHost && p.peerId !== localPeerId && (
+                      <button
+                        className="ml-1 px-2 py-0.5 border border-rose-800 rounded text-rose-300 text-xs"
+                        onClick={() => {
+                          if (window.confirm(`Remove ${p.nickname} from the room?`)) {
+                            void client.kickPlayer(p.peerId).then(report);
+                          }
+                        }}
+                      >
+                        Kick
+                      </button>
+                    )}
                   </td>
                 </tr>
               ))}

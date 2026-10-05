@@ -5,6 +5,7 @@ import {
   getDoc,
   getDocs,
   onSnapshot,
+  runTransaction,
   setDoc,
   Timestamp,
   type Firestore,
@@ -105,5 +106,20 @@ export class HostElectionGateway {
   async clearAllCandidates(roomId: RoomId): Promise<void> {
     const snapshot = await getDocs(this.candidatesRef(roomId));
     await Promise.all(snapshot.docs.map((document) => deleteDoc(document.ref)));
+  }
+
+  // Writes the host document only if it still names `expectedPeerId`. Atomic, so it can never
+  // displace a host that was elected in the meantime.
+  async claimHostIf(
+    roomId: RoomId,
+    expectedPeerId: SignalingPeerId,
+    newPeerId: SignalingPeerId
+  ): Promise<boolean> {
+    return runTransaction(this.client, async (tx) => {
+      const snapshot = await tx.get(this.hostRef(roomId));
+      if (!snapshot.exists() || snapshot.data().signalingPeerId !== expectedPeerId) return false;
+      tx.set(this.hostRef(roomId), { signalingPeerId: newPeerId, nominatedAt: Timestamp.now() });
+      return true;
+    });
   }
 }

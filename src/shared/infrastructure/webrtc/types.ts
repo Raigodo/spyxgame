@@ -26,3 +26,5 @@ export interface RtcPeer {
   signalingPeerId: SignalingPeerId;
   status: RtcPeerStatus;
 }
+
+export type HostTransferResult = "transferred" | "not-host" | "target-unavailable" | "host-changed";

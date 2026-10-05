@@ -56,12 +56,14 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   const [value, setValue] = useState<RoomContextValue | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [superseded, setSuperseded] = useState(false);
+  const [kicked, setKicked] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     const client = new MultiplayerClient({ games: GAMES });
     // Subscribed before joining, so a supersede during the join is never missed.
     const offSuperseded = client.onSessionSuperseded(() => setSuperseded(true));
+    const offKicked = client.onKicked(() => setKicked(true));
 
     // Deferred a tick so React StrictMode's mount → cleanup → mount in dev
     // never starts two joins with the same playerId (which would trigger
@@ -92,6 +94,8 @@ export function RoomProvider({ children }: { children: ReactNode }) {
       cancelled = true;
       clearTimeout(timer);
       offSuperseded();
+      offKicked();
+      setKicked(false);
       setValue(null);
       setError(null);
       setSuperseded(false);
@@ -100,8 +104,12 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   }, [roomId, initialPlayerId]);
 
   if (error) return <Message>Couldn&apos;t join: {error}</Message>;
+
   if (superseded)
     return <Message>This tab was disconnected: a newer connection took over.</Message>;
+
+  if (kicked) return <Message>You were removed from the room by the host.</Message>;
+
   if (!value) return <Message>Connecting…</Message>;
 
   return (

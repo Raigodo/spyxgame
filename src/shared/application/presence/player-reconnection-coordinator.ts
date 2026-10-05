@@ -18,7 +18,8 @@ type PresenceEvent =
   | { t: "pong"; nonce: string } // old peer -> host
   | { t: "rejected" } // host -> rejected peer
   | { t: "duplicate"; playerId: string; oldPeerId: SignalingPeerId; newPeerId: SignalingPeerId } // host -> all
-  | { t: "hello" }; // guest -> host: "send me the presence status"
+  | { t: "hello" } // guest -> host: "send me the presence status"
+  | { t: "kicked" }; // host -> kicked peer
 
 type ChangeHandler = () => void;
 type SupersededHandler = () => void;
@@ -73,6 +74,8 @@ function parsePresenceEvent(raw: unknown): PresenceEvent | undefined {
         : undefined;
     case "hello":
       return { t: "hello" };
+    case "kicked":
+      return { t: "kicked" };
     default:
       return undefined;
   }
@@ -133,6 +136,7 @@ export class PlayerReconnectionCoordinator {
 
   private readonly channel: EventChannel<PresenceEvent>;
   private wasHost: boolean;
+  private readonly kickedHandlers = new Set<SupersededHandler>();
 
   constructor(
     private readonly session: PlayerSession,
@@ -315,6 +319,21 @@ export class PlayerReconnectionCoordinator {
     return () => this.supersededHandlers.delete(handler);
   }
 
+  // Fires on the player the host removed.
+  onKicked(handler: SupersededHandler): () => void {
+    this.kickedHandlers.add(handler);
+    return () => this.kickedHandlers.delete(handler);
+  }
+
+  // Host only. Tells the player why, then removes them from the room.
+  kick(peerId: SignalingPeerId): boolean {
+    const localPeerId = this.session.getLocalPlayer()?.peerId;
+    if (!this.session.isHost() || peerId === localPeerId) return false;
+    if (!this.session.getPlayers().some((p) => p.peerId === peerId)) return false;
+    this.reject(peerId, "kicked");
+    return true;
+  }
+
   // Fires with a peerId that was hidden as a newcomer-under-arbitration and
   // has now been confirmed as the surviving side.
   onPeerRevealed(handler: RevealHandler): () => void {
@@ -344,6 +363,17 @@ export class PlayerReconnectionCoordinator {
         );
       return;
     }
+
+    if (event.t === "kicked" && from === hostPeerId) {
+      for (const handler of this.kickedHandlers) handler();
+      this.session
+        .leave()
+        .catch((error) =>
+          console.warn("[PlayerReconnectionCoordinator] Failed to leave after being kicked", error)
+        );
+      return;
+    }
+
     if (event.t === "duplicate" && from === hostPeerId) {
       this.registerActiveDuplicate(event.playerId, event.oldPeerId, event.newPeerId);
       this.emitChanged();
@@ -567,12 +597,12 @@ export class PlayerReconnectionCoordinator {
     }
   }
 
-  private reject(peerId: SignalingPeerId): void {
-    this.channel.sendTo(peerId, { t: "rejected" }); // best-effort courtesy notice
+  private reject(peerId: SignalingPeerId, notice: "rejected" | "kicked" = "rejected"): void {
+    this.channel.sendTo(peerId, { t: notice }); // best-effort courtesy notice
     this.session
       .hostRemovePeer(peerId)
       .catch((error) =>
-        console.warn("[PlayerReconnectionCoordinator] Failed to remove rejected peer", error)
+        console.warn("[PlayerReconnectionCoordinator] Failed to remove peer", error)
       );
   }
 

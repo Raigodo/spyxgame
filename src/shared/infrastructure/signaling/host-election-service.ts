@@ -70,6 +70,36 @@ export class HostElectionService {
     await this.electionGateway.clearHost(this.roomId);
   }
 
+  // A refreshed host taking its seat back. `formerPeerId` is its own previous incarnation.
+  //  - "former-present": that peer is still in the room (the guests have not noticed it died yet,
+  //    or it is a live duplicate tab). Do not claim.
+  //  - "host-changed": the host document names someone else now. Too late.
+  async claimHost(
+    formerPeerId: SignalingPeerId
+  ): Promise<"claimed" | "former-present" | "host-changed"> {
+    if (await this.membershipGateway.peerExists(this.roomId, formerPeerId)) return "former-present";
+    const claimed = await this.electionGateway.claimHostIf(
+      this.roomId,
+      formerPeerId,
+      this.localPeerId
+    );
+    if (!claimed) return "host-changed";
+    this.cancelPendingElection(); // our own pending election, if the watch-for-offer timer got there first
+    return "claimed";
+  }
+
+  // Host only. Atomically gives the host document to `targetPeerId`, only while it still names us.
+  async transferHost(targetPeerId: SignalingPeerId): Promise<boolean> {
+    if (targetPeerId === this.localPeerId) return false;
+    const transferred = await this.electionGateway.claimHostIf(
+      this.roomId,
+      this.localPeerId,
+      targetPeerId
+    );
+    if (transferred) this.cancelPendingElection();
+    return transferred;
+  }
+
   async removeOwnCandidacy(): Promise<void> {
     await this.electionGateway.removeCandidate(this.roomId, this.localPeerId);
   }

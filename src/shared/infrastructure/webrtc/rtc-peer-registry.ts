@@ -50,6 +50,16 @@ export class RtcPeerRegistry {
     this.notifyLeft(signalingPeerId, entry);
   }
 
+  // Drops an entry without announcing a departure: the peer is still in the room, we just no
+  // longer need a link to it. Removed from the map first, so the "connection died" event that
+  // closing fires finds nothing to reconnect.
+  discard(signalingPeerId: SignalingPeerId): void {
+    const entry = this.peers.get(signalingPeerId);
+    if (!entry) return;
+    this.peers.delete(signalingPeerId);
+    this.disposeEntry(entry);
+  }
+
   onAnyStatusChanged(handler: StatusChangedHandler): () => void {
     this.statusChangedHandlers.add(handler);
     return () => this.statusChangedHandlers.delete(handler);

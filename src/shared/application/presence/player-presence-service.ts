@@ -2,6 +2,7 @@ import type { PlayerProfile, PlayerSession } from "@/shared/infrastructure/playe
 import { PlayerReconnectionCoordinator } from "./player-reconnection-coordinator";
 import type { RosterPlayer } from "./types";
 import { RoomBus } from "../messaging";
+import { SignalingPeerId } from "@/shared/infrastructure/signaling";
 
 type RosterPlayerHandler = (player: RosterPlayer) => void;
 type SupersededHandler = () => void;
@@ -130,6 +131,16 @@ export class PlayerPresenceService {
   // through whatever screen happens to be active when it fires.
   onSessionSuperseded(handler: SupersededHandler): () => void {
     return this.reconnection.onSessionSuperseded(handler);
+  }
+
+  /** Host only. Removes a player from the room; they are told why. Returns false if it could not be done. */
+  kickPlayer(peerId: SignalingPeerId): boolean {
+    return this.reconnection.kick(peerId);
+  }
+
+  /** Fires on the player the host removed. */
+  onKicked(handler: SupersededHandler): () => void {
+    return this.reconnection.onKicked(handler);
   }
 
   private emit(handlers: Set<RosterPlayerHandler>, profile: PlayerProfile): void {
