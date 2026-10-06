@@ -1,45 +1,43 @@
-// active-rtc-connection.ts
+import { Emitter, shortId, type IdGenerator, type Logger } from "@/shared/kernel";
+import type { RtcDataChannelPort } from "./ports/rtc-data-channel-port";
+import type { RtcPeerConnectionPort } from "./ports/rtc-peer-connection-port";
 
 export type ActiveRtcConnectionState = "connected" | "disconnected" | "failed";
 
+export interface ActiveRtcConnectionDeps {
+  connection: RtcPeerConnectionPort;
+  channel: RtcDataChannelPort;
+  ids: IdGenerator;
+  logger: Logger;
+}
+
 export class ActiveRtcConnection {
-  readonly id: string = crypto.randomUUID();
+  readonly id: string;
 
   private state: ActiveRtcConnectionState = "connected";
-  private readonly stateHandlers = new Set<(state: ActiveRtcConnectionState) => void>();
-  private readonly messageHandlers = new Set<(message: string) => void>();
+  private readonly stateChanged = new Emitter<ActiveRtcConnectionState>();
+  private readonly messageReceived = new Emitter<string>();
+  private readonly log: Logger;
 
-  constructor(
-    private readonly connection: RTCPeerConnection,
-    private readonly dataChannel: RTCDataChannel
-  ) {
-    console.log(`[ActiveRtcConnection][${this.id}] Created`);
+  constructor(private readonly deps: ActiveRtcConnectionDeps) {
+    this.id = deps.ids.next();
+    this.log = deps.logger.child(shortId(this.id));
+    this.log.debug("Created");
 
-    this.connection.onconnectionstatechange = () => {
-      const native = this.connection.connectionState;
-      console.log(`[ActiveRtcConnection][${this.id}] Connection state changed: ${native}`);
+    deps.connection.onConnectionState((native) => {
+      this.log.debug(`Connection state changed: ${native}`);
+      if (native === "failed") this.setState("failed");
+      else if (native === "disconnected" || native === "closed") this.setState("disconnected");
+    });
 
-      if (native === "failed") {
-        this.setState("failed");
-      } else if (native === "disconnected" || native === "closed") {
-        this.setState("disconnected");
-      }
-    };
+    deps.channel.onMessage((message) => this.messageReceived.emit(message));
 
-    this.dataChannel.onmessage = (event: MessageEvent<string>) => {
-      for (const handler of this.messageHandlers) {
-        handler(event.data);
-      }
-    };
-
-    this.dataChannel.onclose = () => {
-      console.log(`[ActiveRtcConnection][${this.id}] Data channel closed`);
+    deps.channel.onClose(() => {
+      this.log.debug("Data channel closed");
       this.setState("disconnected");
-    };
+    });
 
-    this.dataChannel.onerror = (event) => {
-      console.warn(`[ActiveRtcConnection][${this.id}] Data channel error`, event);
-    };
+    deps.channel.onError((error) => this.log.warn("Data channel error", error));
   }
 
   // ─── State ────────────────────────────────────────────────────────────────
@@ -49,46 +47,39 @@ export class ActiveRtcConnection {
   }
 
   onStateChange(handler: (state: ActiveRtcConnectionState) => void): () => void {
-    this.stateHandlers.add(handler);
-    return () => this.stateHandlers.delete(handler);
+    return this.stateChanged.on(handler);
   }
 
   // ─── Messaging ────────────────────────────────────────────────────────────
 
   send(message: string): void {
     if (this.state !== "connected") {
-      throw new Error(`[ActiveRtcConnection][${this.id}] Cannot send — state is '${this.state}'`);
+      throw new Error(`[ActiveRtcConnection] Cannot send: state is '${this.state}'`);
     }
-    if (this.dataChannel.readyState !== "open") {
-      throw new Error(
-        `[ActiveRtcConnection][${this.id}] Cannot send — data channel is '${this.dataChannel.readyState}'`
-      );
+    const { readyState } = this.deps.channel;
+    if (readyState !== "open") {
+      throw new Error(`[ActiveRtcConnection] Cannot send: data channel is '${readyState}'`);
     }
-    this.dataChannel.send(message);
+    this.deps.channel.send(message);
   }
 
   onMessage(handler: (message: string) => void): () => void {
-    this.messageHandlers.add(handler);
-    return () => this.messageHandlers.delete(handler);
+    return this.messageReceived.on(handler);
   }
 
   // ─── Lifecycle ────────────────────────────────────────────────────────────
 
   close(): void {
-    console.log(`[ActiveRtcConnection][${this.id}] Closed explicitly`);
-    this.dataChannel.close();
-    this.connection.close();
+    this.log.debug("Closed explicitly");
+    this.deps.channel.close();
+    this.deps.connection.close();
     this.setState("disconnected");
   }
 
-  // ─── Private ──────────────────────────────────────────────────────────────
-
   private setState(state: ActiveRtcConnectionState): void {
     if (this.state === state) return;
-    console.log(`[ActiveRtcConnection][${this.id}] State: ${this.state} → ${state}`);
+    this.log.debug(`State: ${this.state} → ${state}`);
     this.state = state;
-    for (const handler of this.stateHandlers) {
-      handler(state);
-    }
+    this.stateChanged.emit(state);
   }
 }

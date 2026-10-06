@@ -1,66 +1,66 @@
-// rtc-peer-link-factory.ts
-
-import { SignalingPeerId, SignalingSession } from "../signaling";
-import { RtcConnectionFactory } from "./rtc-connection-factory";
+import { shortId, type IdGenerator, type Logger } from "@/shared/kernel";
+import type { SignalingPeerId, SignalingSession } from "../signaling";
+import type { RtcConnectionProvider } from "./ports/rtc-connection-provider";
+import { RtcLinkNegotiator } from "./rtc-link-negotiator";
 import type { RtcPeerRegistry } from "./rtc-peer-registry";
 import type { PeerEntry } from "./types";
 
-type MessageHandler = (message: string, from: SignalingPeerId) => void;
-type ConnectionDiedHandler = (signalingPeerId: SignalingPeerId) => void;
+export interface RtcPeerLinkFactoryDeps {
+  signaling: SignalingSession;
+  registry: RtcPeerRegistry;
+  connections: RtcConnectionProvider;
+  ids: IdGenerator;
+  logger: Logger;
+  onMessage: (message: string, from: SignalingPeerId) => void;
+  onConnectionDied: (signalingPeerId: SignalingPeerId) => void;
+  isHost: () => boolean;
+  isLeaving: () => boolean;
+}
 
 export class RtcPeerLinkFactory {
-  constructor(
-    private readonly signalingSession: SignalingSession,
-    private readonly registry: RtcPeerRegistry,
-    private readonly onMessage: MessageHandler,
-    private readonly onConnectionDied: ConnectionDiedHandler,
-    private readonly isHost: () => boolean,
-    private readonly isLeaving: () => boolean
-  ) {}
+  constructor(private readonly deps: RtcPeerLinkFactoryDeps) {}
 
   create(signalingPeerId: SignalingPeerId): PeerEntry {
-    console.log(`[RtcPeerLinkFactory] Creating link for peer=${short(signalingPeerId)}`);
+    const { signaling, registry, connections, ids, logger, isHost, isLeaving } = this.deps;
+    const peer = shortId(signalingPeerId);
+    logger.debug(`Creating link for peer=${peer}`);
 
-    const factory = new RtcConnectionFactory();
-    const entry: PeerEntry = {
-      factory,
-      connection: null,
-      status: "connecting",
-    };
+    const negotiator = new RtcLinkNegotiator({
+      connection: connections.create(),
+      ids,
+      logger: logger.child("negotiator"),
+    });
+    const entry: PeerEntry = { negotiator, connection: null, status: "connecting" };
 
-    factory.onIceCandidateCreated((candidate) => {
-      if (this.isLeaving()) return;
-      console.log(`[RtcPeerLinkFactory] ICE candidate for peer=${short(signalingPeerId)}`);
-      void this.signalingSession
-        .sendIceCandidate(signalingPeerId, candidate, this.isHost() ? "remove" : "do-nothing")
-        .catch(logSendFailure("ICE candidate", signalingPeerId));
+    negotiator.onIceCandidateCreated((candidate) => {
+      if (isLeaving()) return;
+      logger.debug(`ICE candidate for peer=${peer}`);
+      void signaling
+        .sendIceCandidate(signalingPeerId, candidate, isHost() ? "remove" : "do-nothing")
+        .catch(this.logSendFailure("ICE candidate", signalingPeerId));
     });
 
-    factory.onAnswerCreated((answer) => {
-      if (this.isLeaving()) return;
-      console.log(`[RtcPeerLinkFactory] Answer created for peer=${short(signalingPeerId)}`);
-      void this.signalingSession
-        .sendAnswer(signalingPeerId, answer.sdp!, "do-nothing")
-        .catch(logSendFailure("answer", signalingPeerId));
+    negotiator.onAnswerCreated((answer) => {
+      if (isLeaving()) return;
+      logger.debug(`Answer created for peer=${peer}`);
+      void signaling
+        .sendAnswer(signalingPeerId, answer.sdp, "do-nothing")
+        .catch(this.logSendFailure("answer", signalingPeerId));
     });
 
-    factory.onConnected((connection) => {
-      if (this.isLeaving()) return;
-      console.log(`[RtcPeerLinkFactory] Connected to peer=${short(signalingPeerId)}`);
+    negotiator.onConnected((connection) => {
+      if (isLeaving()) return;
+      logger.debug(`Connected to peer=${peer}`);
 
       entry.connection = connection;
-      this.registry.setStatus(signalingPeerId, "active");
+      registry.setStatus(signalingPeerId, "active");
 
-      connection.onMessage((message) => {
-        this.onMessage(message, signalingPeerId);
-      });
+      connection.onMessage((message) => this.deps.onMessage(message, signalingPeerId));
 
       connection.onStateChange((state) => {
-        console.log(
-          `[RtcPeerLinkFactory] Connection state changed peer=${short(signalingPeerId)} state=${state}`
-        );
+        logger.debug(`Connection state changed peer=${peer} state=${state}`);
         if (state === "disconnected" || state === "failed") {
-          this.onConnectionDied(signalingPeerId);
+          this.deps.onConnectionDied(signalingPeerId);
         }
       });
     });
@@ -69,26 +69,23 @@ export class RtcPeerLinkFactory {
   }
 
   async initiateOffer(signalingPeerId: SignalingPeerId, entry: PeerEntry): Promise<void> {
-    console.log(`[RtcPeerLinkFactory] Initiating offer to peer=${short(signalingPeerId)}`);
+    const { signaling, logger, isHost, isLeaving } = this.deps;
+    logger.debug(`Initiating offer to peer=${shortId(signalingPeerId)}`);
 
-    entry.factory.onOfferCreated((offer) => {
-      if (this.isLeaving()) return;
-      console.log(`[RtcPeerLinkFactory] Offer created for peer=${short(signalingPeerId)}`);
-      void this.signalingSession
-        .sendOffer(signalingPeerId, offer.sdp!, this.isHost() ? "remove" : "do-nothing")
-        .catch(logSendFailure("offer", signalingPeerId));
+    entry.negotiator.onOfferCreated((offer) => {
+      if (isLeaving()) return;
+      logger.debug(`Offer created for peer=${shortId(signalingPeerId)}`);
+      void signaling
+        .sendOffer(signalingPeerId, offer.sdp, isHost() ? "remove" : "do-nothing")
+        .catch(this.logSendFailure("offer", signalingPeerId));
     });
 
-    await entry.factory.initiateOffer();
+    await entry.negotiator.initiateOffer();
   }
-}
 
-function short(id: string): string {
-  return id.slice(0, 8);
-}
-
-// A peer can leave the room between creating a signal and sending it. That is expected, not an error.
-function logSendFailure(kind: string, peerId: string) {
-  return (error: unknown) =>
-    console.warn(`[RtcPeerLinkFactory] Could not send ${kind} to peer=${short(peerId)}`, error);
+  // A peer can leave the room between creating a signal and sending it. Expected, not an error.
+  private logSendFailure(kind: string, peerId: SignalingPeerId) {
+    return (error: unknown) =>
+      this.deps.logger.warn(`Could not send ${kind} to peer=${shortId(peerId)}`, error);
+  }
 }

@@ -1,15 +1,18 @@
-import { SignalingPeerId } from "../signaling";
+import { Emitter, shortId, type Logger } from "@/shared/kernel";
+import type { SignalingPeerId } from "../signaling";
 import type { PeerEntry, RtcPeer, RtcPeerStatus } from "./types";
 
-type RtcPeerHandler = (peer: RtcPeer) => void;
-
-type StatusChangedHandler = (status: RtcPeerStatus, signalingPeerId: SignalingPeerId) => void;
+export interface RtcPeerRegistryDeps {
+  logger: Logger;
+}
 
 export class RtcPeerRegistry {
   private readonly peers = new Map<SignalingPeerId, PeerEntry>();
-  private readonly peerJoinedHandlers = new Set<RtcPeerHandler>();
-  private readonly peerLeftHandlers = new Set<RtcPeerHandler>();
-  private readonly statusChangedHandlers = new Set<StatusChangedHandler>();
+  private readonly joined = new Emitter<RtcPeer>();
+  private readonly left = new Emitter<RtcPeer>();
+  private readonly statusChanged = new Emitter<RtcPeer>();
+
+  constructor(private readonly deps: RtcPeerRegistryDeps) {}
 
   // ─── Query ────────────────────────────────────────────────────────────────
 
@@ -36,7 +39,7 @@ export class RtcPeerRegistry {
 
   add(signalingPeerId: SignalingPeerId, entry: PeerEntry): void {
     this.peers.set(signalingPeerId, entry);
-    this.notifyJoined(signalingPeerId, entry);
+    this.joined.emit({ signalingPeerId, status: entry.status });
   }
 
   replace(signalingPeerId: SignalingPeerId, entry: PeerEntry): void {
@@ -47,7 +50,7 @@ export class RtcPeerRegistry {
     const entry = this.peers.get(signalingPeerId);
     if (!entry) return;
     this.peers.delete(signalingPeerId);
-    this.notifyLeft(signalingPeerId, entry);
+    this.left.emit({ signalingPeerId, status: entry.status });
   }
 
   // Drops an entry without announcing a departure: the peer is still in the room, we just no
@@ -60,64 +63,39 @@ export class RtcPeerRegistry {
     this.disposeEntry(entry);
   }
 
-  onAnyStatusChanged(handler: StatusChangedHandler): () => void {
-    this.statusChangedHandlers.add(handler);
-    return () => this.statusChangedHandlers.delete(handler);
-  }
-
   setStatus(signalingPeerId: SignalingPeerId, status: RtcPeerStatus): void {
     const entry = this.peers.get(signalingPeerId);
     if (!entry || entry.status === status) return;
-    console.log(
-      `[RtcPeerRegistry] Peer=${short(signalingPeerId)} status: ${entry.status} → ${status}`
-    );
+    this.deps.logger.debug(`Peer=${shortId(signalingPeerId)} status: ${entry.status} → ${status}`);
     entry.status = status;
-    for (const handler of this.statusChangedHandlers) {
-      handler(status, signalingPeerId);
-    }
+    this.statusChanged.emit({ signalingPeerId, status });
   }
 
   disposeAndRemoveAll(): void {
     for (const [signalingPeerId, entry] of Array.from(this.peers)) {
-      this.peers.delete(signalingPeerId); // first, for the same reason as above
+      this.peers.delete(signalingPeerId); // first, for the same reason as in discard()
       this.disposeEntry(entry);
-      this.notifyLeft(signalingPeerId, entry);
+      this.left.emit({ signalingPeerId, status: entry.status });
     }
   }
 
   disposeEntry(entry: PeerEntry): void {
     entry.connection?.close();
-    entry.factory.close();
+    entry.negotiator.close();
     entry.connection = null;
   }
 
   // ─── Events ───────────────────────────────────────────────────────────────
 
-  onPeerJoined(handler: RtcPeerHandler): () => void {
-    this.peerJoinedHandlers.add(handler);
-    return () => this.peerJoinedHandlers.delete(handler);
+  onPeerJoined(handler: (peer: RtcPeer) => void): () => void {
+    return this.joined.on(handler);
   }
 
-  onPeerLeft(handler: RtcPeerHandler): () => void {
-    this.peerLeftHandlers.add(handler);
-    return () => this.peerLeftHandlers.delete(handler);
+  onPeerLeft(handler: (peer: RtcPeer) => void): () => void {
+    return this.left.on(handler);
   }
 
-  // ─── Private ─────────────────────────────────────────────────────────────
-
-  private notifyJoined(signalingPeerId: SignalingPeerId, entry: PeerEntry): void {
-    for (const handler of this.peerJoinedHandlers) {
-      handler({ signalingPeerId, status: entry.status });
-    }
+  onStatusChanged(handler: (peer: RtcPeer) => void): () => void {
+    return this.statusChanged.on(handler);
   }
-
-  private notifyLeft(signalingPeerId: SignalingPeerId, entry: PeerEntry): void {
-    for (const handler of this.peerLeftHandlers) {
-      handler({ signalingPeerId, status: entry.status });
-    }
-  }
-}
-
-function short(id: string): string {
-  return id.slice(0, 8);
 }

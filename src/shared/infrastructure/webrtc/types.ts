@@ -1,23 +1,11 @@
-//webrtc/types
-
-import { SignalingPeerId } from "../signaling";
-import { ActiveRtcConnection } from "./active-rtc-connection";
-import { RtcConnectionFactory } from "./rtc-connection-factory";
-
-export type RtcPeerId = string;
+import type { SignalingPeerId } from "../signaling";
+import type { ActiveRtcConnection } from "./active-rtc-connection";
+import type { RtcLinkNegotiator } from "./rtc-link-negotiator";
 
 export type RtcPeerStatus = "connecting" | "active" | "reconnecting";
 
-export interface RtcPeerInfo {
-  rtcPeerId: RtcPeerId;
-  signalingPeerId: SignalingPeerId;
-  status: RtcPeerStatus;
-}
-
-export type RtcMessage = string | object | ArrayBuffer;
-
 export interface PeerEntry {
-  factory: RtcConnectionFactory;
+  negotiator: RtcLinkNegotiator;
   connection: ActiveRtcConnection | null;
   status: RtcPeerStatus;
 }

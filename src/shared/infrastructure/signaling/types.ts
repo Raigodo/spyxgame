@@ -15,16 +15,6 @@ export interface SignalingMessage<T = unknown> {
   payload: T;
 }
 
-export interface SendMessageInput<T = unknown> {
-  fromPeerId: SignalingPeerId;
-  toPeerId: SignalingPeerId;
-  payload: T;
-}
-
-export interface MessageHandler<T = unknown> {
-  handle(message: SignalingMessage<T>): Promise<void>;
-}
-
 export type WebRtcSignal =
   | {
       type: "offer";

@@ -1,35 +1,37 @@
-// web-rtc-service.ts
-
 import {
-  createSignalingSession,
-  type RoomId,
-  type SignalingPeerId,
-} from "@/shared/infrastructure/signaling";
+  Emitter,
+  shortId,
+  type Clock,
+  type IdGenerator,
+  type Logger,
+  type WebRtcConfig,
+} from "@/shared/kernel";
+import type { RoomId, SignalingPeerId, SignalingSession, WebRtcSignal } from "../signaling";
+import type { RtcConnectionProvider } from "./ports/rtc-connection-provider";
 import { RtcPeerLinkFactory } from "./rtc-peer-link-factory";
 import { RtcPeerRegistry } from "./rtc-peer-registry";
 import { RtcReconnectionManager } from "./rtc-reconnection-manager";
-import { HostTransferResult, RtcPeer } from "./types";
+import type { HostTransferResult, RtcPeer } from "./types";
+import { IceCandidate } from "./ports/rtc-peer-connection-port";
 
-type RtcPeerHandler = (peer: RtcPeer) => void;
-type RtcMessageHandler = (message: string, from: SignalingPeerId) => void;
-type HostChangedHandler = (hostPeerId: SignalingPeerId | undefined) => void;
-
-// How long a returning host keeps trying to take its seat back (covers slow failure detection).
-const RECLAIM_WINDOW_MS = 10_000;
-
-type SignalingPayload =
-  | { type: "offer"; sdp: string }
-  | { type: "answer"; sdp: string }
-  | { type: "ice-candidate"; candidate: RTCIceCandidateInit };
+export interface WebRtcServiceDeps {
+  session: SignalingSession;
+  connections: RtcConnectionProvider;
+  clock: Clock;
+  ids: IdGenerator;
+  logger: Logger;
+  config: WebRtcConfig;
+}
 
 export class WebRtcService {
-  private readonly session = createSignalingSession();
-  private readonly registry = new RtcPeerRegistry();
+  private readonly registry: RtcPeerRegistry;
+  private readonly linkFactory: RtcPeerLinkFactory;
+  private readonly reconnectionManager: RtcReconnectionManager;
 
-  private readonly peerJoinedHandlers = new Set<RtcPeerHandler>();
-  private readonly peerLeftHandlers = new Set<RtcPeerHandler>();
-  private readonly messageHandlers = new Set<RtcMessageHandler>();
-  private readonly hostChangedHandlers = new Set<HostChangedHandler>();
+  private readonly peerJoined = new Emitter<RtcPeer>();
+  private readonly peerLeft = new Emitter<RtcPeer>();
+  private readonly messageReceived = new Emitter<{ message: string; from: SignalingPeerId }>();
+  private readonly hostChanged = new Emitter<SignalingPeerId | undefined>();
   private readonly cleanupFns: Array<() => void> = [];
 
   private leaving = false;
@@ -37,33 +39,46 @@ export class WebRtcService {
   private joined = false;
   private currentHostPeerId?: SignalingPeerId;
   private leavePromise?: Promise<void>;
-
-  private readonly linkFactory: RtcPeerLinkFactory;
-  private readonly reconnectionManager: RtcReconnectionManager;
   private reclaim?: { former: SignalingPeerId; stop: () => void };
 
-  constructor() {
-    this.linkFactory = new RtcPeerLinkFactory(
-      this.session,
-      this.registry,
-      (message, from) => {
-        for (const handler of this.messageHandlers) handler(message, from);
-      },
-      (signalingPeerId) => {
+  constructor(private readonly deps: WebRtcServiceDeps) {
+    const { session, connections, clock, ids, logger, config } = deps;
+
+    this.registry = new RtcPeerRegistry({ logger: logger.child("registry") });
+
+    this.linkFactory = new RtcPeerLinkFactory({
+      signaling: session,
+      registry: this.registry,
+      connections,
+      ids,
+      logger: logger.child("link"),
+      onMessage: (message, from) => this.messageReceived.emit({ message, from }),
+      onConnectionDied: (signalingPeerId) => {
         void this.reconnectionManager.handleConnectionDied(signalingPeerId);
       },
-      () => this.isHostRole,
-      () => this.leaving
-    );
+      isHost: () => this.isHostRole,
+      isLeaving: () => this.leaving,
+    });
 
-    this.reconnectionManager = new RtcReconnectionManager(
-      this.registry,
-      this.linkFactory,
-      () => this.session.host,
-      () => this.isHostRole,
-      () => this.leaving,
-      () => this.currentHostPeerId
-    );
+    this.reconnectionManager = new RtcReconnectionManager({
+      registry: this.registry,
+      linkFactory: this.linkFactory,
+      getHostElection: () => session.host,
+      isHost: () => this.isHostRole,
+      isLeaving: () => this.leaving,
+      getHostPeerId: () => this.currentHostPeerId,
+      clock,
+      logger: logger.child("reconnect"),
+      config,
+    });
+  }
+
+  private get session(): SignalingSession {
+    return this.deps.session;
+  }
+
+  private get log(): Logger {
+    return this.deps.logger;
   }
 
   // ─── Public API ───────────────────────────────────────────────────────────
@@ -73,13 +88,11 @@ export class WebRtcService {
     peerId?: SignalingPeerId,
     options: { formerHostPeerId?: SignalingPeerId } = {}
   ): Promise<void> {
-    if (this.joined) {
-      throw new Error("[WebRtcService] Already joined a room.");
-    }
+    if (this.joined) throw new Error("[WebRtcService] Already joined a room.");
     this.joined = true;
     this.isHostRole = false;
 
-    console.log(`[WebRtcService] Joining room=${roomId}`);
+    this.log.debug(`Joining room=${roomId}`);
     try {
       await this.session.joinRoom(roomId, peerId);
     } catch (error) {
@@ -90,32 +103,25 @@ export class WebRtcService {
     this.reconnectionManager.start();
 
     this.cleanupFns.push(
-      this.registry.onPeerJoined((peer) => {
-        for (const handler of this.peerJoinedHandlers) handler(peer);
-      }),
-
-      this.registry.onPeerLeft((peer) => {
-        for (const handler of this.peerLeftHandlers) handler(peer);
-      }),
+      this.registry.onPeerJoined((peer) => this.peerJoined.emit(peer)),
+      this.registry.onPeerLeft((peer) => this.peerLeft.emit(peer)),
 
       this.session.onPeerJoined((peer) => {
-        console.log(`[WebRtcService] Signaling peer joined: ${short(peer.peerId)}`);
+        this.log.debug(`Signaling peer joined: ${shortId(peer.peerId)}`);
         void this.handleSignalingPeerJoined(peer.peerId);
       }),
 
       this.session.onPeerLeft((peer) => {
-        console.log(`[WebRtcService] Signaling peer left: ${short(peer.peerId)}`);
+        this.log.debug(`Signaling peer left: ${shortId(peer.peerId)}`);
         this.handleSignalingPeerLeft(peer.peerId);
       }),
 
       this.session.onSignalReceived((message) => {
-        void this.handleSignalReceived(message.fromPeerId, message.payload as SignalingPayload);
+        void this.handleSignalReceived(message.fromPeerId, message.payload);
       }),
 
       this.session.host.onHostChanged((host) => {
-        console.log(
-          `[WebRtcService] Host changed → ${host ? short(host.signalingPeerId) : "null"}`
-        );
+        this.log.debug(`Host changed → ${host ? shortId(host.signalingPeerId) : "null"}`);
         void this.handleHostChanged(host);
       })
     );
@@ -123,10 +129,10 @@ export class WebRtcService {
     const currentHost = await this.session.host.currentHost();
 
     if (!currentHost) {
-      console.log("[WebRtcService] No host on join — triggering election");
+      this.log.debug("No host on join, triggering election");
       await this.session.host.electNextHost();
     } else {
-      console.log(`[WebRtcService] Host already exists: ${short(currentHost.signalingPeerId)}`);
+      this.log.debug(`Host already exists: ${shortId(currentHost.signalingPeerId)}`);
       await this.handleHostChanged(currentHost);
     }
 
@@ -144,34 +150,13 @@ export class WebRtcService {
     return this.leavePromise;
   }
 
-  async doLeave(): Promise<void> {
-    this.reclaim?.stop();
-    if (!this.joined) return;
-
-    this.leaving = true;
-    console.log("[WebRtcService] Leaving room");
-
-    this.reconnectionManager.stop();
-
-    for (const cleanup of this.cleanupFns) cleanup();
-    this.cleanupFns.length = 0;
-
-    this.registry.disposeAndRemoveAll();
-
-    await this.session.leaveRoom();
-
-    this.joined = false;
-    this.leaving = false;
-    this.currentHostPeerId = undefined;
-  }
-
   async removePeer(signalingPeerId: SignalingPeerId): Promise<void> {
     await this.session.removePeer(signalingPeerId);
   }
 
   // Host only. Hands the host role to a peer we have an active link to. One atomic write: it
-  // succeeds only while the host document still names us. Everyone then follows the normal
-  // role change; the new host recovers state from the guests (including us, now a guest).
+  // succeeds only while the host document still names us. Everyone then follows the normal role
+  // change; the new host recovers state from the guests (including us, now a guest).
   async transferHost(targetPeerId: SignalingPeerId): Promise<HostTransferResult> {
     if (!this.isHostRole || this.leaving) return "not-host";
     const entry = this.registry.get(targetPeerId);
@@ -205,13 +190,13 @@ export class WebRtcService {
   sendMessageToPeer(signalingPeerId: SignalingPeerId, message: string): void {
     const entry = this.registry.get(signalingPeerId);
     if (!entry || entry.status !== "active" || !entry.connection) {
-      console.warn(`[WebRtcService] Peer=${short(signalingPeerId)} not active, dropping message`);
+      this.log.warn(`Peer=${shortId(signalingPeerId)} not active, dropping message`);
       return;
     }
     try {
       entry.connection.send(message);
     } catch (error) {
-      console.warn(`[WebRtcService] Send failed to peer=${short(signalingPeerId)}`, error);
+      this.log.warn(`Send failed to peer=${shortId(signalingPeerId)}`, error);
     }
   }
 
@@ -221,44 +206,60 @@ export class WebRtcService {
       try {
         entry.connection.send(message);
       } catch (error) {
-        console.warn(`[WebRtcService] Broadcast failed to peer=${short(signalingPeerId)}`, error);
+        this.log.warn(`Broadcast failed to peer=${shortId(signalingPeerId)}`, error);
       }
     }
   }
 
-  onPeerJoined(handler: RtcPeerHandler): () => void {
-    this.peerJoinedHandlers.add(handler);
-    return () => this.peerJoinedHandlers.delete(handler);
+  onPeerJoined(handler: (peer: RtcPeer) => void): () => void {
+    return this.peerJoined.on(handler);
   }
 
-  onPeerLeft(handler: RtcPeerHandler): () => void {
-    this.peerLeftHandlers.add(handler);
-    return () => this.peerLeftHandlers.delete(handler);
+  onPeerLeft(handler: (peer: RtcPeer) => void): () => void {
+    return this.peerLeft.on(handler);
   }
 
-  // Fires on connecting/active/reconnecting transitions — lets consumers
-  // react immediately instead of polling getPeers() on an interval.
-  onPeerStatusChanged(handler: RtcPeerHandler): () => void {
-    return this.registry.onAnyStatusChanged((status, signalingPeerId) => {
-      handler({ signalingPeerId, status });
-    });
+  // Fires on connecting/active/reconnecting transitions, so consumers never poll getPeers().
+  onPeerStatusChanged(handler: (peer: RtcPeer) => void): () => void {
+    return this.registry.onStatusChanged(handler);
   }
 
-  onMessage(handler: RtcMessageHandler): () => void {
-    this.messageHandlers.add(handler);
-    return () => this.messageHandlers.delete(handler);
+  onMessage(handler: (message: string, from: SignalingPeerId) => void): () => void {
+    return this.messageReceived.on(({ message, from }) => handler(message, from));
   }
 
-  onHostChanged(handler: HostChangedHandler): () => void {
-    this.hostChangedHandlers.add(handler);
-    return () => this.hostChangedHandlers.delete(handler);
+  onHostChanged(handler: (hostPeerId: SignalingPeerId | undefined) => void): () => void {
+    return this.hostChanged.on(handler);
+  }
+
+  // ─── Leaving ──────────────────────────────────────────────────────────────
+
+  private async doLeave(): Promise<void> {
+    this.reclaim?.stop();
+    if (!this.joined) return;
+
+    this.leaving = true;
+    this.log.debug("Leaving room");
+
+    this.reconnectionManager.stop();
+
+    for (const cleanup of this.cleanupFns) cleanup();
+    this.cleanupFns.length = 0;
+
+    this.registry.disposeAndRemoveAll();
+
+    await this.session.leaveRoom();
+
+    this.joined = false;
+    this.leaving = false;
+    this.currentHostPeerId = undefined;
   }
 
   // ─── Host role ────────────────────────────────────────────────────────────
 
   // A refreshed host returns with a fresh peerId. While the host document still names its previous
-  // incarnation, take the seat back as soon as that peer is gone from the room (the guests remove it
-  // once they notice its link died). If the document names anyone else first, the window is over.
+  // incarnation, take the seat back as soon as that peer is gone from the room (the guests remove
+  // it once they notice its link died). If the document names anyone else first, the window is over.
   private startReclaim(former: SignalingPeerId): void {
     this.reclaim?.stop();
 
@@ -269,7 +270,7 @@ export class WebRtcService {
     const stop = () => {
       if (done) return;
       done = true;
-      clearTimeout(timer);
+      cancelTimer();
       offLeft();
       if (this.reclaim?.former === former) this.reclaim = undefined;
     };
@@ -283,10 +284,10 @@ export class WebRtcService {
       busy = true;
       try {
         const result = await this.session.host.claimHost(former);
-        console.log(`[WebRtcService] Host reclaim: ${result}`);
+        this.log.debug(`Host reclaim: ${result}`);
         if (result !== "former-present" || final) stop();
       } catch (error) {
-        console.warn("[WebRtcService] Host reclaim failed", error);
+        this.log.warn("Host reclaim failed", error);
         stop();
       } finally {
         busy = false;
@@ -300,7 +301,9 @@ export class WebRtcService {
     const offLeft = this.session.onPeerLeft((peer) => {
       if (peer.peerId === former) void attempt(false);
     });
-    const timer = setTimeout(() => void attempt(true), RECLAIM_WINDOW_MS);
+    const cancelTimer = this.deps.clock.after(this.deps.config.reclaimWindowMs, () => {
+      void attempt(true);
+    });
     this.reclaim = { former, stop };
     void attempt(false);
   }
@@ -316,64 +319,57 @@ export class WebRtcService {
     if (!host) {
       this.reconnectionManager.clearAllOfferWatches();
       this.currentHostPeerId = undefined;
-      for (const handler of this.hostChangedHandlers) handler(undefined);
-      console.log("[WebRtcService] Host document cleared — triggering election");
+      this.hostChanged.emit(undefined);
+      this.log.debug("Host document cleared, triggering election");
       await this.session.host.electNextHost();
       return;
     }
 
     this.currentHostPeerId = host.signalingPeerId;
 
-    // Offer watches belong to one specific host. A stale one firing after the host has moved on would
-    // report a live peer as dead.
+    // Offer watches belong to one specific host. A stale one firing after the host has moved on
+    // would report a live peer as dead.
     this.reconnectionManager.clearAllOfferWatches();
 
-    const localPeerId = this.session.peerId;
-    const iAmHost = host.signalingPeerId === localPeerId;
-
-    console.log(`[WebRtcService] Host is ${short(host.signalingPeerId)}${iAmHost ? " (me)" : ""}`);
+    const iAmHost = host.signalingPeerId === this.session.peerId;
+    this.log.debug(`Host is ${shortId(host.signalingPeerId)}${iAmHost ? " (me)" : ""}`);
 
     await this.setRole(iAmHost);
 
-    for (const handler of this.hostChangedHandlers) handler(host.signalingPeerId);
+    this.hostChanged.emit(host.signalingPeerId);
 
-    if (!iAmHost) {
-      this.reconnectionManager.watchForOffer(host.signalingPeerId);
-    }
+    if (!iAmHost) this.reconnectionManager.watchForOffer(host.signalingPeerId);
   }
 
   private async setRole(isHost: boolean): Promise<void> {
     if (this.isHostRole === isHost) return;
 
-    console.log(
-      `[WebRtcService] Role changing: ${this.isHostRole ? "host" : "guest"} → ${isHost ? "host" : "guest"}`
+    this.log.debug(
+      `Role changing: ${this.isHostRole ? "host" : "guest"} → ${isHost ? "host" : "guest"}`
     );
     this.isHostRole = isHost;
 
-    if (!isHost) {
-      console.log("[WebRtcService] Became guest");
-      return; // handleHostChanged drops links to everyone except the new host
-    }
+    if (!isHost) return; // links to everyone except the new host are left open on purpose
 
-    console.log("[WebRtcService] Became host — connecting to unconnected peers");
+    this.log.debug("Became host, connecting to unconnected peers");
     for (const peer of this.session.getPeers()) {
       if (this.registry.has(peer.peerId)) {
-        console.log(`[WebRtcService] Already have entry for peer=${short(peer.peerId)}, keeping`);
+        this.log.debug(`Already have entry for peer=${shortId(peer.peerId)}, keeping`);
         continue;
       }
-      console.log(`[WebRtcService] No entry for peer=${short(peer.peerId)}, creating and offering`);
+      this.log.debug(`No entry for peer=${shortId(peer.peerId)}, creating and offering`);
       const entry = this.linkFactory.create(peer.peerId);
       this.registry.add(peer.peerId, entry);
       await this.linkFactory.initiateOffer(peer.peerId, entry);
     }
   }
 
-  // ─── Signaling peer events ─────────────────────────────────────────────────
+  // ─── Signaling peer events ────────────────────────────────────────────────
 
   private async handleSignalingPeerJoined(signalingPeerId: SignalingPeerId): Promise<void> {
     if (!this.isHostRole) return;
     if (this.registry.has(signalingPeerId)) {
-      console.warn(`[WebRtcService] Peer=${short(signalingPeerId)} already exists, skipping`);
+      this.log.warn(`Peer=${shortId(signalingPeerId)} already exists, skipping`);
       return;
     }
 
@@ -392,13 +388,13 @@ export class WebRtcService {
     this.registry.disposeEntry(entry);
   }
 
-  // ─── Signal handling ────────────────────────────────────────────────────────
+  // ─── Signal handling ──────────────────────────────────────────────────────
 
   private async handleSignalReceived(
     signalingPeerId: SignalingPeerId,
-    signal: SignalingPayload
+    signal: WebRtcSignal
   ): Promise<void> {
-    console.log(`[WebRtcService] Signal from peer=${short(signalingPeerId)} type=${signal.type}`);
+    this.log.debug(`Signal from peer=${shortId(signalingPeerId)} type=${signal.type}`);
 
     switch (signal.type) {
       case "offer":
@@ -411,7 +407,7 @@ export class WebRtcService {
         await this.handleIceCandidate(signalingPeerId, signal.candidate);
         break;
       default:
-        console.warn(`[WebRtcService] Unknown signal type from peer=${short(signalingPeerId)}`);
+        this.log.warn(`Unknown signal type from peer=${shortId(signalingPeerId)}`);
     }
   }
 
@@ -419,40 +415,32 @@ export class WebRtcService {
     let entry = this.registry.get(signalingPeerId);
 
     if (!entry) {
-      console.log(
-        `[WebRtcService] Creating entry for peer=${short(signalingPeerId)} on offer arrival`
-      );
+      this.log.debug(`Creating entry for peer=${shortId(signalingPeerId)} on offer arrival`);
       entry = this.linkFactory.create(signalingPeerId);
       this.registry.add(signalingPeerId, entry);
     }
 
-    await entry.factory.applyOffer({ type: "offer", sdp });
+    await entry.negotiator.applyOffer({ type: "offer", sdp });
   }
 
   private async handleAnswer(signalingPeerId: SignalingPeerId, sdp: string): Promise<void> {
     const entry = this.registry.get(signalingPeerId);
     if (!entry) {
-      console.warn(`[WebRtcService] Answer from unknown peer=${short(signalingPeerId)}, ignoring`);
+      this.log.warn(`Answer from unknown peer=${shortId(signalingPeerId)}, ignoring`);
       return;
     }
-    await entry.factory.applyAnswer({ type: "answer", sdp });
+    await entry.negotiator.applyAnswer({ type: "answer", sdp });
   }
 
   private async handleIceCandidate(
     signalingPeerId: SignalingPeerId,
-    candidate: RTCIceCandidateInit
+    candidate: IceCandidate
   ): Promise<void> {
     const entry = this.registry.get(signalingPeerId);
     if (!entry) {
-      console.warn(
-        `[WebRtcService] ICE candidate from unknown peer=${short(signalingPeerId)}, ignoring`
-      );
+      this.log.warn(`ICE candidate from unknown peer=${shortId(signalingPeerId)}, ignoring`);
       return;
     }
-    await entry.factory.applyIceCandidate(candidate);
+    await entry.negotiator.applyIceCandidate(candidate);
   }
-}
-
-function short(id: string): string {
-  return id.slice(0, 8);
 }

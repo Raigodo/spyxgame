@@ -10,19 +10,19 @@ import {
   setDoc,
   Timestamp,
   type Firestore,
-  type Unsubscribe,
 } from "firebase/firestore";
+import type { Unsubscribe } from "@/shared/kernel";
+import type { SignalInboxPort } from "../../ports/signal-inbox-port";
+import type { MessageId, RoomId, SignalingMessage, SignalingPeerId } from "../../types";
 
-import type { MessageId, RoomId, SignalingMessage, SignalingPeerId } from "./types";
-
-interface FirestoreMessage {
+interface StoredMessage {
   fromPeerId: string;
   timestamp: Timestamp;
   payload: unknown;
 }
 
-export class SignalingMessageGateway {
-  public constructor(private readonly client: Firestore) {}
+export class FirestoreSignalInboxAdapter implements SignalInboxPort {
+  constructor(private readonly client: Firestore) {}
 
   private messagesRef(roomId: RoomId, peerId: SignalingPeerId) {
     return collection(this.client, "rooms", roomId, "signaling-peers", peerId, "messages");
@@ -53,8 +53,7 @@ export class SignalingMessageGateway {
     peerId: SignalingPeerId,
     messageId: MessageId
   ): Promise<boolean> {
-    const snapshot = await getDoc(this.messageRef(roomId, peerId, messageId));
-    return snapshot.exists();
+    return (await getDoc(this.messageRef(roomId, peerId, messageId))).exists();
   }
 
   subscribeToMessages(
@@ -67,9 +66,7 @@ export class SignalingMessageGateway {
     return onSnapshot(messagesQuery, (snapshot) => {
       for (const change of snapshot.docChanges()) {
         if (change.type !== "added") continue;
-
-        const data = change.doc.data() as FirestoreMessage;
-
+        const data = change.doc.data() as StoredMessage;
         onMessage({
           id: change.doc.id,
           fromPeerId: data.fromPeerId,

@@ -1,53 +1,60 @@
-import { Countdown } from "./countdown";
-import type { HostDocument, HostElectionGateway } from "./host-election-gateway";
-import type { RoomMembershipGateway } from "./room-membership-gateway";
-import { SignalingMessageGateway } from "./signaling-message-gateway";
+import { Countdown, shortId, type Clock, type Logger, type SignalingConfig } from "@/shared/kernel";
+import type { HostElectionPort, HostDocument } from "./ports/host-election-port";
+import type { RoomMembershipPort } from "./ports/room-membership-port";
+import type { SignalInboxPort } from "./ports/signal-inbox-port";
 import type { RoomId, SignalingPeerId } from "./types";
 
-const CANDIDATE_COLLECTION_WINDOW_MS = 5_000;
-const POSITION_INTERVAL_MS = 5_000;
-
 type HostChangedHandler = (host: HostDocument | null) => void;
+
+export interface HostElectionServiceDeps {
+  membership: RoomMembershipPort;
+  election: HostElectionPort;
+  messages: SignalInboxPort;
+  clock: Clock;
+  logger: Logger;
+  config: SignalingConfig;
+  roomId: RoomId;
+  localPeerId: SignalingPeerId;
+}
 
 export class HostElectionService {
   private readonly hostChangedHandlers = new Set<HostChangedHandler>();
   private unsubscribeFromHost?: () => void;
 
-  private readonly collectionWindow = new Countdown(() => void this.onCollectionWindowElapsed());
-  private readonly positionCountdown = new Countdown(() => void this.onPositionCountdownElapsed());
+  private readonly collectionWindow: Countdown;
+  private readonly positionCountdown: Countdown;
   private pendingDeadHostId?: SignalingPeerId;
 
-  public constructor(
-    private readonly membershipGateway: RoomMembershipGateway,
-    private readonly electionGateway: HostElectionGateway,
-    private readonly messageGateway: SignalingMessageGateway,
-    private readonly roomId: RoomId,
-    private readonly localPeerId: SignalingPeerId
-  ) {}
+  constructor(private readonly deps: HostElectionServiceDeps) {
+    this.collectionWindow = new Countdown(deps.clock, () => void this.onCollectionWindowElapsed());
+    this.positionCountdown = new Countdown(
+      deps.clock,
+      () => void this.onPositionCountdownElapsed()
+    );
+  }
+
+  private get log(): Logger {
+    return this.deps.logger;
+  }
 
   // ─── Lifecycle ────────────────────────────────────────────────────────────
 
   start(): void {
-    console.log("[HostElectionService] Starting");
-    this.unsubscribeFromHost = this.electionGateway.subscribeToHost(this.roomId, (host) => {
-      console.log(
-        `[HostElectionService] Host document changed: ${host ? short(host.signalingPeerId) : "null"}`
-      );
+    this.log.debug("Starting");
+    this.unsubscribeFromHost = this.deps.election.subscribeToHost(this.deps.roomId, (host) => {
+      this.log.debug(`Host document changed: ${host ? shortId(host.signalingPeerId) : "null"}`);
 
-      // Any host-document change — elected or cleared — means whatever
-      // election was running has concluded. Cancelling here, inside the
-      // subscription itself, means nothing outside this class has to
-      // remember to do it (that was the source of one of the earlier bugs).
+      // Any host-document change (elected or cleared) means whatever election was running has
+      // concluded. Cancelling here, inside the subscription itself, means nothing outside this
+      // class has to remember to do it (that was the source of one of the earlier bugs).
       this.cancelPendingElection();
 
-      for (const handler of this.hostChangedHandlers) {
-        handler(host);
-      }
+      for (const handler of this.hostChangedHandlers) handler(host);
     });
   }
 
   stop(): void {
-    console.log("[HostElectionService] Stopping");
+    this.log.debug("Stopping");
     this.cancelPendingElection();
     this.unsubscribeFromHost?.();
     this.unsubscribeFromHost = undefined;
@@ -62,12 +69,12 @@ export class HostElectionService {
   }
 
   async currentHost(): Promise<HostDocument | null> {
-    return this.electionGateway.getHost(this.roomId);
+    return this.deps.election.getHost(this.deps.roomId);
   }
 
   async clearHost(): Promise<void> {
-    console.log("[HostElectionService] Clearing host document");
-    await this.electionGateway.clearHost(this.roomId);
+    this.log.debug("Clearing host document");
+    await this.deps.election.clearHost(this.deps.roomId);
   }
 
   // A refreshed host taking its seat back. `formerPeerId` is its own previous incarnation.
@@ -77,12 +84,9 @@ export class HostElectionService {
   async claimHost(
     formerPeerId: SignalingPeerId
   ): Promise<"claimed" | "former-present" | "host-changed"> {
-    if (await this.membershipGateway.peerExists(this.roomId, formerPeerId)) return "former-present";
-    const claimed = await this.electionGateway.claimHostIf(
-      this.roomId,
-      formerPeerId,
-      this.localPeerId
-    );
+    const { membership, election, roomId, localPeerId } = this.deps;
+    if (await membership.peerExists(roomId, formerPeerId)) return "former-present";
+    const claimed = await election.claimHostIf(roomId, formerPeerId, localPeerId);
     if (!claimed) return "host-changed";
     this.cancelPendingElection(); // our own pending election, if the watch-for-offer timer got there first
     return "claimed";
@@ -90,95 +94,79 @@ export class HostElectionService {
 
   // Host only. Atomically gives the host document to `targetPeerId`, only while it still names us.
   async transferHost(targetPeerId: SignalingPeerId): Promise<boolean> {
-    if (targetPeerId === this.localPeerId) return false;
-    const transferred = await this.electionGateway.claimHostIf(
-      this.roomId,
-      this.localPeerId,
-      targetPeerId
-    );
+    const { election, roomId, localPeerId } = this.deps;
+    if (targetPeerId === localPeerId) return false;
+    const transferred = await election.claimHostIf(roomId, localPeerId, targetPeerId);
     if (transferred) this.cancelPendingElection();
     return transferred;
   }
 
   async removeOwnCandidacy(): Promise<void> {
-    await this.electionGateway.removeCandidate(this.roomId, this.localPeerId);
+    await this.deps.election.removeCandidate(this.deps.roomId, this.deps.localPeerId);
   }
 
-  // Elects a host from the currently live signaling peers, deterministically
-  // (lexicographic order), excluding `excludePeerId`. Used both for a fresh
-  // room's first host and for re-election after a confirmed death.
+  // Elects a host from the currently live signaling peers, deterministically (lexicographic
+  // order), excluding `excludePeerId`. Used both for a fresh room's first host and for
+  // re-election after a confirmed death.
   async electNextHost(excludePeerId?: SignalingPeerId): Promise<SignalingPeerId | null> {
-    console.log("[HostElectionService] Electing next host");
+    const { membership, election, roomId, localPeerId } = this.deps;
+    this.log.debug("Electing next host");
 
-    const livePeers = await this.membershipGateway.listPeers(this.roomId);
-    const candidateIds = Array.from(new Set([this.localPeerId, ...livePeers.map((p) => p.peerId)]))
+    const livePeers = await membership.listPeers(roomId);
+    const candidateIds = Array.from(new Set([localPeerId, ...livePeers.map((p) => p.peerId)]))
       .filter((id) => id !== excludePeerId)
       .sort();
 
-    if (candidateIds.length === 0) {
-      console.warn("[HostElectionService] No peers available for election");
+    const nextPeerId = candidateIds[0];
+    if (nextPeerId === undefined) {
+      this.log.warn("No peers available for election");
       return null;
     }
 
-    const nextPeerId = candidateIds[0];
-    console.log(`[HostElectionService] Writing next host: ${short(nextPeerId)}`);
-    await this.electionGateway.writeHost(this.roomId, nextPeerId);
+    this.log.debug(`Writing next host: ${shortId(nextPeerId)}`);
+    await election.writeHost(roomId, nextPeerId);
 
-    // Best-effort: every registered candidacy — for this dead host or any
-    // earlier one — is now permanently moot. Candidate lookups are always
-    // scoped to one specific dead-host id, so nothing will ever read a
-    // stale entry again; left uncleaned it just sits there forever.
-    this.electionGateway
-      .clearAllCandidates(this.roomId)
-      .catch((error) =>
-        console.warn("[HostElectionService] Failed to clear stale candidates", error)
-      );
+    // Best-effort: every registered candidacy, for this dead host or any earlier one, is now
+    // moot. Candidate lookups are scoped to one dead-host id, so nothing reads a stale entry.
+    election
+      .clearAllCandidates(roomId)
+      .catch((error) => this.log.warn("Failed to clear stale candidates", error));
 
     return nextPeerId;
   }
 
-  // Called by the RTC layer whenever it suspects `deadHostPeerId` is no
-  // longer responding. Idempotent for the same dead host id — a second
-  // report for a death already being handled doesn't restart the collection
-  // window (that would keep pushing the election out forever).
+  // Called by the RTC layer whenever it suspects `deadHostPeerId` is no longer responding.
+  // Idempotent for the same dead host id: a second report for a death already being handled
+  // doesn't restart the collection window (that would keep pushing the election out forever).
   reportSuspectedDeath(deadHostPeerId: SignalingPeerId): void {
+    const { membership, election, messages, roomId, localPeerId, config } = this.deps;
     if (this.pendingDeadHostId === deadHostPeerId) return;
 
     this.cancelPendingElection();
     this.pendingDeadHostId = deadHostPeerId;
 
-    console.log(
-      `[HostElectionService] Removing confirmed-dead peer from room: ${short(deadHostPeerId)}`
-    );
-    this.membershipGateway
-      .removePeer(this.roomId, deadHostPeerId)
-      .catch((error) => console.warn("[HostElectionService] Failed to remove dead peer", error));
+    this.log.debug(`Removing confirmed-dead peer from room: ${shortId(deadHostPeerId)}`);
+    membership
+      .removePeer(roomId, deadHostPeerId)
+      .catch((error) => this.log.warn("Failed to remove dead peer", error));
 
-    // Best-effort: no one will ever read this peer's inbox again — it's
-    // gone from the room, and nothing is listening to its subscription
-    // anymore. Anything mid-flight to it (an offer/ICE sent moments before
-    // it died) would otherwise sit there unread indefinitely.
-    this.messageGateway
-      .clearInbox(this.roomId, deadHostPeerId)
-      .catch((error) =>
-        console.warn("[HostElectionService] Failed to clear dead peer's inbox", error)
-      );
+    // Best-effort: nobody reads this peer's inbox again, so anything mid-flight to it would
+    // otherwise sit there unread indefinitely.
+    messages
+      .clearInbox(roomId, deadHostPeerId)
+      .catch((error) => this.log.warn("Failed to clear dead peer's inbox", error));
 
-    console.log(
-      `[HostElectionService] Registering candidacy for dead host=${short(deadHostPeerId)}`
-    );
-    this.electionGateway
-      .registerCandidate(this.roomId, this.localPeerId, deadHostPeerId)
+    this.log.debug(`Registering candidacy for dead host=${shortId(deadHostPeerId)}`);
+    election
+      .registerCandidate(roomId, localPeerId, deadHostPeerId)
       .then(() => {
         if (this.pendingDeadHostId !== deadHostPeerId) return;
-        console.log(
-          `[HostElectionService] Collecting candidates for ${CANDIDATE_COLLECTION_WINDOW_MS}ms`
-        );
-        this.collectionWindow.start(CANDIDATE_COLLECTION_WINDOW_MS);
+        this.log.debug(`Collecting candidates for ${config.candidateCollectionWindowMs}ms`);
+        this.collectionWindow.start(config.candidateCollectionWindowMs);
       })
       .catch((error) => {
-        console.warn(
-          `[HostElectionService] Failed to register candidacy for dead host=${short(deadHostPeerId)}`,
+        this.log.warn(
+          `Failed to register candidacy for dead host=${shortId(deadHostPeerId)}`,
           error
         );
       });
@@ -188,14 +176,11 @@ export class HostElectionService {
   cancelPendingElection(): void {
     this.collectionWindow.stop();
     this.positionCountdown.stop();
-    if (this.pendingDeadHostId) {
-      console.log("[HostElectionService] Election cancelled");
-    }
+    if (this.pendingDeadHostId) this.log.debug("Election cancelled");
     this.pendingDeadHostId = undefined;
   }
 
-  // Lets a caller check whether a specific peer is the one currently being
-  // waited on, without exposing full internal state.
+  // Lets a caller check whether a specific peer is the one currently being waited on.
   getSuspectedDeadHostId(): SignalingPeerId | undefined {
     return this.pendingDeadHostId;
   }
@@ -209,23 +194,19 @@ export class HostElectionService {
     const orderedCandidates = await this.getOrderedCandidates(deadHostPeerId);
     if (this.pendingDeadHostId !== deadHostPeerId) return; // superseded meanwhile
 
-    console.log(
-      `[HostElectionService] Candidates for dead host=${short(deadHostPeerId)}: [${orderedCandidates.map(short).join(", ")}]`
+    this.log.debug(
+      `Candidates for dead host=${shortId(deadHostPeerId)}: [${orderedCandidates.map(shortId).join(", ")}]`
     );
 
-    const myPosition = orderedCandidates.indexOf(this.localPeerId);
+    const myPosition = orderedCandidates.indexOf(this.deps.localPeerId);
     if (myPosition === -1) {
-      console.warn(
-        `[HostElectionService] Local peer ${short(this.localPeerId)} not in candidate list — skipping`
-      );
+      this.log.warn(`Local peer ${shortId(this.deps.localPeerId)} not in candidate list, skipping`);
       this.pendingDeadHostId = undefined;
       return;
     }
 
-    const delay = myPosition * POSITION_INTERVAL_MS;
-    console.log(
-      `[HostElectionService] Countdown started — position=${myPosition} delay=${delay}ms`
-    );
+    const delay = myPosition * this.deps.config.positionIntervalMs;
+    this.log.debug(`Countdown started: position=${myPosition} delay=${delay}ms`);
     this.positionCountdown.start(delay);
   }
 
@@ -233,26 +214,21 @@ export class HostElectionService {
     const deadHostPeerId = this.pendingDeadHostId;
     if (!deadHostPeerId) return;
 
-    console.log("[HostElectionService] Countdown fired — electing next host");
+    this.log.debug("Countdown fired, electing next host");
     await this.electNextHost(deadHostPeerId);
-    if (this.pendingDeadHostId === deadHostPeerId) {
-      this.pendingDeadHostId = undefined;
-    }
+    if (this.pendingDeadHostId === deadHostPeerId) this.pendingDeadHostId = undefined;
   }
 
   private async getOrderedCandidates(deadHostPeerId: SignalingPeerId): Promise<SignalingPeerId[]> {
+    const { election, membership, roomId, localPeerId } = this.deps;
     const [candidateIds, livePeers] = await Promise.all([
-      this.electionGateway.listCandidates(this.roomId, deadHostPeerId),
-      this.membershipGateway.listPeers(this.roomId),
+      election.listCandidates(roomId, deadHostPeerId),
+      membership.listPeers(roomId),
     ]);
 
     const liveIds = new Set(livePeers.map((p) => p.peerId));
-    liveIds.add(this.localPeerId);
+    liveIds.add(localPeerId);
 
     return candidateIds.filter((id) => id !== deadHostPeerId && liveIds.has(id)).sort();
   }
-}
-
-function short(id: string): string {
-  return id.slice(0, 8);
 }

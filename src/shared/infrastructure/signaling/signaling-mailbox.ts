@@ -1,71 +1,66 @@
-import type { SignalingMessageGateway } from "./signaling-message-gateway";
-import type { MessageHandler, RoomId, SignalingMessage, SignalingPeerId } from "./types";
+import type { Clock, IdGenerator, Logger } from "@/shared/kernel";
+import type { SignalInboxPort } from "./ports/signal-inbox-port";
+import type { RoomId, SignalingMessage, SignalingPeerId } from "./types";
+
+export interface SignalingMailboxDeps {
+  inbox: SignalInboxPort;
+  ids: IdGenerator;
+  clock: Clock;
+  logger: Logger;
+  roomId: RoomId;
+  localPeerId: SignalingPeerId;
+}
 
 export class SignalingMailbox {
   private unsubscribeFromMessages?: () => void;
 
-  public constructor(
-    private readonly gateway: SignalingMessageGateway,
-    private readonly roomId: RoomId,
-    private readonly currentPeerId: SignalingPeerId
-  ) {}
+  constructor(private readonly deps: SignalingMailboxDeps) {}
 
-  public async send<T>(
+  async send<T>(
     message: Omit<SignalingMessage<T>, "timestamp" | "fromPeerId" | "id">
   ): Promise<SignalingMessage> {
     const enhancedMessage = {
       ...message,
-      id: crypto.randomUUID(),
-      timestamp: new Date(),
-      fromPeerId: this.currentPeerId,
+      id: this.deps.ids.next(),
+      timestamp: new Date(this.deps.clock.now()),
+      fromPeerId: this.deps.localPeerId,
     };
-    await this.gateway.addMessage(this.roomId, enhancedMessage);
+    await this.deps.inbox.addMessage(this.deps.roomId, enhancedMessage);
     return enhancedMessage;
   }
 
-  public startReceivingFor<T>(
-    peerId: SignalingPeerId,
-    messageHandler: MessageHandler<T>,
-    onMessageReceived?: (message: SignalingMessage<T>) => void
-  ): void {
+  /** Calls `onMessage` for each incoming message, then deletes it. A throwing handler leaves it in place. */
+  startReceivingFor(peerId: SignalingPeerId, onMessage: (message: SignalingMessage) => void): void {
     this.stopReceiving();
 
-    this.unsubscribeFromMessages = this.gateway.subscribeToMessages(
-      this.roomId,
+    this.unsubscribeFromMessages = this.deps.inbox.subscribeToMessages(
+      this.deps.roomId,
       peerId,
-      (message) =>
-        void this.handleReceivedMessage(
-          peerId,
-          messageHandler,
-          onMessageReceived,
-          message as SignalingMessage<T>
-        )
+      (message) => void this.handleReceivedMessage(peerId, onMessage, message)
     );
   }
 
-  public stopReceiving(): void {
+  stopReceiving(): void {
     this.unsubscribeFromMessages?.();
     this.unsubscribeFromMessages = undefined;
   }
 
-  private async handleReceivedMessage<T>(
-    peerId: SignalingPeerId,
-    messageHandler: MessageHandler<T>,
-    onMessageReceived: ((message: SignalingMessage<T>) => void) | undefined,
-    message: SignalingMessage<T>
-  ): Promise<void> {
-    try {
-      await messageHandler.handle(message);
-      onMessageReceived?.(message);
-      await this.gateway.deleteMessage(this.roomId, peerId, message.id);
-    } catch (error) {
-      console.warn(`[SignalingMailbox] Failed to handle signaling message "${message.id}".`, error);
-    }
-  }
-
-  public async isMessageStillPending(
+  async isMessageStillPending(
     message: Pick<SignalingMessage, "toPeerId" | "id">
   ): Promise<boolean> {
-    return this.gateway.messageExists(this.roomId, message.toPeerId, message.id);
+    return this.deps.inbox.messageExists(this.deps.roomId, message.toPeerId, message.id);
+  }
+
+  private async handleReceivedMessage(
+    peerId: SignalingPeerId,
+    onMessage: (message: SignalingMessage) => void,
+    message: SignalingMessage
+  ): Promise<void> {
+    try {
+      onMessage(message);
+      await this.deps.inbox.deleteMessage(this.deps.roomId, peerId, message.id);
+    } catch (error) {
+      this.deps.logger.warn(`Failed to handle signaling message "${message.id}"`, error);
+    }
   }
 }

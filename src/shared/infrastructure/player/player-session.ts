@@ -1,4 +1,4 @@
-import { ChunkedMessenger } from "../webrtc/chunked-messenger";
+import { createChunkedMessenger, type ChunkedMessenger } from "../webrtc";
 import { PlayerDirectory } from "./player-directory";
 import { WebRtcService } from "../webrtc/web-rtc-service";
 import { RoomId, SignalingPeerId } from "../signaling";
@@ -30,7 +30,7 @@ export class PlayerSession {
   private localProfile?: PlayerProfile;
 
   constructor(private readonly rtc: WebRtcService) {
-    this.messenger = new ChunkedMessenger(rtc);
+    this.messenger = createChunkedMessenger(rtc);
   }
 
   // ─── Public API ───────────────────────────────────────────────────────────

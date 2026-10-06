@@ -1,10 +1,12 @@
-import { SignalingPeerId } from "../signaling";
+import {
+  Emitter,
+  type Cancel,
+  type Clock,
+  type IdGenerator,
+  type WebRtcConfig,
+} from "@/shared/kernel";
+import type { SignalingPeerId } from "../signaling";
 import type { WebRtcService } from "./web-rtc-service";
-
-// Conservative: comfortably under the ~16KB-ish limit that's reliable
-// across browsers for a single RTCDataChannel send().
-const MAX_CHUNK_SIZE = 12_000;
-const CHUNK_BUFFER_TTL_MS = 30_000;
 
 interface ChunkEnvelope {
   __chunk: true;
@@ -14,69 +16,77 @@ interface ChunkEnvelope {
   data: string;
 }
 
+/** The part of WebRtcService the messenger needs. A test fake only implements these. */
+export type RawMessaging = Pick<
+  WebRtcService,
+  "onMessage" | "sendMessageToPeer" | "broadcastMessage"
+>;
+
+export interface ChunkedMessengerDeps {
+  rtc: RawMessaging;
+  clock: Clock;
+  ids: IdGenerator;
+  config: WebRtcConfig;
+}
+
 type MessageHandler = (message: string, from: SignalingPeerId) => void;
 
-// Makes "send a string of any size, reliably" possible over WebRtcService's
-// raw messaging by splitting into bounded chunks and reassembling on the
-// other end. WebRtcService's data channels are already ordered+reliable by
-// default, so chunks of one message never arrive out of order relative to
-// each other; buffers are still keyed by (sender, messageId) so concurrent
-// large messages from different senders never collide.
+// Makes "send a string of any size, reliably" possible over WebRtcService's raw messaging by
+// splitting into bounded chunks and reassembling on the other end. Data channels are ordered and
+// reliable per connection, so chunks of one message never arrive out of order relative to each
+// other; buffers are still keyed by (sender, messageId) so concurrent large messages from
+// different senders never collide.
 export class ChunkedMessenger {
   private readonly buffers = new Map<
     string,
     { parts: string[]; received: number; total: number; expiresAt: number }
   >();
-  private readonly messageHandlers = new Set<MessageHandler>();
-  private cleanupTimer?: ReturnType<typeof setInterval>;
+  private readonly messageReceived = new Emitter<{ message: string; from: SignalingPeerId }>();
+  private cancelCleanup?: Cancel;
 
-  constructor(private readonly rtc: WebRtcService) {
-    rtc.onMessage((raw, from) => this.handleIncoming(raw, from));
+  constructor(private readonly deps: ChunkedMessengerDeps) {
+    deps.rtc.onMessage((raw, from) => this.handleIncoming(raw, from));
   }
 
   start(): void {
-    this.cleanupTimer = setInterval(() => this.dropExpiredBuffers(), CHUNK_BUFFER_TTL_MS);
+    this.cancelCleanup?.();
+    this.cancelCleanup = this.deps.clock.every(this.deps.config.chunkBufferTtlMs, () =>
+      this.dropExpiredBuffers()
+    );
   }
 
   stop(): void {
-    if (this.cleanupTimer) clearInterval(this.cleanupTimer);
-    this.cleanupTimer = undefined;
+    this.cancelCleanup?.();
+    this.cancelCleanup = undefined;
     this.buffers.clear();
   }
 
   sendToPeer(peerId: SignalingPeerId, message: string): void {
-    for (const chunk of this.split(message)) {
-      this.rtc.sendMessageToPeer(peerId, chunk);
-    }
+    for (const chunk of this.split(message)) this.deps.rtc.sendMessageToPeer(peerId, chunk);
   }
 
   broadcast(message: string): void {
-    for (const chunk of this.split(message)) {
-      this.rtc.broadcastMessage(chunk);
-    }
+    for (const chunk of this.split(message)) this.deps.rtc.broadcastMessage(chunk);
   }
 
   onMessage(handler: MessageHandler): () => void {
-    this.messageHandlers.add(handler);
-    return () => this.messageHandlers.delete(handler);
+    return this.messageReceived.on(({ message, from }) => handler(message, from));
   }
 
   private split(message: string): string[] {
-    if (message.length <= MAX_CHUNK_SIZE) {
-      return [message];
-    }
+    const size = this.deps.config.maxChunkSize;
+    if (message.length <= size) return [message];
 
-    const messageId = crypto.randomUUID();
-    const total = Math.ceil(message.length / MAX_CHUNK_SIZE);
+    const messageId = this.deps.ids.next();
+    const total = Math.ceil(message.length / size);
     const chunks: string[] = [];
     for (let index = 0; index < total; index++) {
-      const data = message.slice(index * MAX_CHUNK_SIZE, (index + 1) * MAX_CHUNK_SIZE);
       const envelope: ChunkEnvelope = {
         __chunk: true,
         messageId,
         index,
         total,
-        data,
+        data: message.slice(index * size, (index + 1) * size),
       };
       chunks.push(JSON.stringify(envelope));
     }
@@ -88,12 +98,12 @@ export class ChunkedMessenger {
     try {
       parsed = JSON.parse(raw);
     } catch {
-      this.emit(raw, from); // not JSON at all — pass through as complete
+      this.messageReceived.emit({ message: raw, from }); // not JSON at all: pass through as complete
       return;
     }
 
-    if (!this.isChunkEnvelope(parsed)) {
-      this.emit(raw, from); // ordinary, already-complete message
+    if (!isChunkEnvelope(parsed)) {
+      this.messageReceived.emit({ message: raw, from }); // ordinary, already-complete message
       return;
     }
 
@@ -101,10 +111,10 @@ export class ChunkedMessenger {
     let buffer = this.buffers.get(key);
     if (!buffer) {
       buffer = {
-        parts: new Array(parsed.total),
+        parts: new Array<string>(parsed.total),
         received: 0,
         total: parsed.total,
-        expiresAt: Date.now() + CHUNK_BUFFER_TTL_MS,
+        expiresAt: this.deps.clock.now() + this.deps.config.chunkBufferTtlMs,
       };
       this.buffers.set(key, buffer);
     }
@@ -116,27 +126,23 @@ export class ChunkedMessenger {
 
     if (buffer.received === buffer.total) {
       this.buffers.delete(key);
-      this.emit(buffer.parts.join(""), from);
+      this.messageReceived.emit({ message: buffer.parts.join(""), from });
     }
   }
 
-  private isChunkEnvelope(value: unknown): value is ChunkEnvelope {
-    return (
-      typeof value === "object" &&
-      value !== null &&
-      (value as Record<string, unknown>).__chunk === true &&
-      typeof (value as Record<string, unknown>).messageId === "string"
-    );
-  }
-
-  private emit(message: string, from: SignalingPeerId): void {
-    for (const handler of this.messageHandlers) handler(message, from);
-  }
-
   private dropExpiredBuffers(): void {
-    const now = Date.now();
+    const now = this.deps.clock.now();
     for (const [key, buffer] of this.buffers) {
       if (buffer.expiresAt <= now) this.buffers.delete(key);
     }
   }
+}
+
+function isChunkEnvelope(value: unknown): value is ChunkEnvelope {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as Record<string, unknown>).__chunk === true &&
+    typeof (value as Record<string, unknown>).messageId === "string"
+  );
 }
