@@ -1,5 +1,3 @@
-// application/messaging/room-bus.ts
-
 import { CommandQueue, type QueuedCommand } from "./command-queue";
 import type {
   BusOptions,
@@ -12,6 +10,7 @@ import type {
   StateChannelOptions,
 } from "./types";
 import { parseWire, type ChannelCopy, type Wire } from "./wire";
+import { Emitter, type Cancel, type Clock, type IdGenerator, type Logger } from "@/shared/kernel";
 
 type ErasedHandler<S> = (args: {
   from: PeerId;
@@ -20,13 +19,6 @@ type ErasedHandler<S> = (args: {
   payload: unknown;
   playerId?: string;
 }) => { ok: true; state: S } | { ok: false; reason: string };
-
-const DEFAULT_OPTIONS: BusOptions = {
-  commandTtlMs: 30_000,
-  recoveryWindowMs: 3_000,
-  recoveryMaxMs: 10_000,
-  resyncIntervalMs: 3_000,
-};
 
 const cmp = (a: { epoch: number; rev: number }, b: { epoch: number; rev: number }) =>
   a.epoch - b.epoch || a.rev - b.rev;
@@ -69,7 +61,7 @@ export class StateChannel<S> implements BusStateChannel {
   private value: S;
   private applied: Record<PeerId, number> = {};
   private synced = false;
-  private readonly listeners = new Set<(value: S, prev: S) => void>();
+  private readonly changed = new Emitter<{ value: S; prev: S }>();
   private readonly handlers = new Map<string, ErasedHandler<S>>();
 
   /** @internal use RoomBus.stateChannel() */
@@ -86,8 +78,7 @@ export class StateChannel<S> implements BusStateChannel {
   }
 
   onChange(handler: (value: S, prev: S) => void): () => void {
-    this.listeners.add(handler);
-    return () => this.listeners.delete(handler);
+    return this.changed.on(({ value, prev }) => handler(value, prev));
   }
 
   /** Registers a command type. Handlers run on whichever peer is host. */
@@ -210,7 +201,7 @@ export class StateChannel<S> implements BusStateChannel {
   }
 
   private emit(value: S, prev: S): void {
-    for (const handler of this.listeners) handler(value, prev);
+    this.changed.emit({ value, prev });
   }
 
   private stateWire(): Wire {
@@ -223,7 +214,7 @@ export class StateChannel<S> implements BusStateChannel {
 // so callers don't need to special-case their own messages.
 
 export class EventChannel<E> implements BusEventChannel {
-  private readonly listeners = new Set<(event: E, from: PeerId) => void>();
+  private readonly received = new Emitter<{ event: E; from: PeerId }>();
 
   /** @internal use RoomBus.eventChannel() */
   constructor(
@@ -233,8 +224,7 @@ export class EventChannel<E> implements BusEventChannel {
   ) {}
 
   onEvent(handler: (event: E, from: PeerId) => void): () => void {
-    this.listeners.add(handler);
-    return () => this.listeners.delete(handler);
+    return this.received.on(({ event, from }) => handler(event, from));
   }
 
   broadcast(event: E): void {
@@ -250,12 +240,12 @@ export class EventChannel<E> implements BusEventChannel {
   /** @internal */
   receive(raw: unknown, from: PeerId): void {
     const event = this.opts.validate(raw);
-    if (event !== undefined) for (const h of this.listeners) h(event, from);
+    if (event !== undefined) this.received.emit({ event, from });
   }
 
   private deliverLocal(event: E): void {
     const from = this.host.transport.getLocalPeerId();
-    if (from) for (const h of this.listeners) h(event, from);
+    if (from) this.received.emit({ event, from });
   }
 }
 
@@ -264,21 +254,31 @@ export class EventChannel<E> implements BusEventChannel {
 interface Recovery {
   best: Map<string, ChannelCopy>;
   offeredBy: Set<PeerId>;
-  slideTimer?: ReturnType<typeof setTimeout>;
-  maxTimer: ReturnType<typeof setTimeout>;
+  cancelSlide?: Cancel;
+  cancelMax: Cancel;
   held: Array<{ w: Extract<Wire, { kind: "command" }>; from: PeerId }>;
 }
 
+export interface RoomBusDeps {
+  transport: BusTransport;
+  clock: Clock;
+  ids: IdGenerator;
+  logger: Logger;
+  config: BusOptions;
+}
+
 export class RoomBus {
+  private readonly transport: BusTransport;
   private readonly options: BusOptions;
   private readonly stateChannels = new Map<string, BusStateChannel>();
   private readonly eventChannels = new Map<string, BusEventChannel>();
-  private readonly queue = new CommandQueue();
-  private readonly statusHandlers = new Set<(status: BusStatus) => void>();
+  private readonly queue: CommandQueue;
+  private readonly statusChanged = new Emitter<BusStatus>();
   private readonly cleanups: Array<() => void> = [];
+  private readonly channelHost: ChannelHost;
 
   private lastHostId?: PeerId;
-  private resyncTimer?: ReturnType<typeof setInterval>;
+  private cancelResync?: Cancel;
 
   private status: BusStatus = "syncing";
   private started = false;
@@ -286,11 +286,19 @@ export class RoomBus {
   private recovery?: Recovery;
   private seq = 0;
 
-  constructor(
-    private readonly transport: BusTransport,
-    options: Partial<BusOptions> = {}
-  ) {
-    this.options = { ...DEFAULT_OPTIONS, ...options };
+  constructor(private readonly deps: RoomBusDeps) {
+    this.transport = deps.transport;
+    this.options = deps.config;
+    this.queue = new CommandQueue(deps.clock);
+    // Built here, not as a field initializer, so it never depends on field-initialization order.
+    this.channelHost = {
+      transport: deps.transport,
+      canPublish: () => this.transport.isHost() && !this.recovery,
+      sendCommand: (ch, type, payload) => this.sendCommand(ch, type, payload),
+      broadcast: (wire) => this.transport.broadcast(wire),
+      sendTo: (to, wire) => this.transport.send(to, wire),
+      statusMayHaveChanged: () => this.refreshStatus(),
+    };
   }
 
   // ─── Channels ─────────────────────────────────────────────────────────────
@@ -334,7 +342,9 @@ export class RoomBus {
     this.cleanups.length = 0;
     this.endRecovery();
     this.queue.rejectAll("client left");
-    this.statusHandlers.clear();
+    this.cancelResync?.();
+    this.cancelResync = undefined;
+    this.statusChanged.clear();
   }
 
   getStatus(): BusStatus {
@@ -342,23 +352,13 @@ export class RoomBus {
   }
 
   onStatusChanged(handler: (status: BusStatus) => void): () => void {
-    this.statusHandlers.add(handler);
-    return () => this.statusHandlers.delete(handler);
+    return this.statusChanged.on(handler);
   }
 
   // ─── Internals exposed to channels ────────────────────────────────────────
 
-  private readonly channelHost: ChannelHost = {
-    transport: this.transport,
-    canPublish: () => this.transport.isHost() && !this.recovery,
-    sendCommand: (ch, type, payload) => this.sendCommand(ch, type, payload),
-    broadcast: (wire) => this.transport.broadcast(wire),
-    sendTo: (to, wire) => this.transport.send(to, wire),
-    statusMayHaveChanged: () => this.refreshStatus(),
-  };
-
   private sendCommand(ch: string, type: string, payload: unknown): Promise<CommandResult> {
-    const cmd: QueuedCommand = { id: crypto.randomUUID(), seq: ++this.seq, ch, type, payload };
+    const cmd: QueuedCommand = { id: this.deps.ids.next(), seq: ++this.seq, ch, type, payload };
     const result = this.queue.enqueue(cmd, this.options.commandTtlMs);
     this.flushQueue();
     return result;
@@ -476,8 +476,6 @@ export class RoomBus {
     }
   }
 
-  // Retries snapshot requests while this guest is unsynced with a live host link, so a
-  // snapshot lost or discarded around a host change can never leave it stuck.
   private updateResync(): void {
     const hostId = this.transport.getHostPeerId();
     const needed =
@@ -487,16 +485,16 @@ export class RoomBus {
       this.transport.isLinkActive(hostId) &&
       Array.from(this.stateChannels.values()).some((c) => !c.isSynced());
 
-    if (needed && !this.resyncTimer) {
-      this.resyncTimer = setInterval(() => {
+    if (needed && !this.cancelResync) {
+      this.cancelResync = this.deps.clock.every(this.options.resyncIntervalMs, () => {
         const current = this.transport.getHostPeerId();
         if (current && !this.transport.isHost() && this.transport.isLinkActive(current)) {
           this.requestMissingSnapshots(current);
         }
-      }, this.options.resyncIntervalMs);
-    } else if (!needed && this.resyncTimer) {
-      clearInterval(this.resyncTimer);
-      this.resyncTimer = undefined;
+      });
+    } else if (!needed && this.cancelResync) {
+      this.cancelResync();
+      this.cancelResync = undefined;
     }
   }
 
@@ -546,13 +544,13 @@ export class RoomBus {
 
   private beginRecovery(): void {
     this.endRecovery();
-    clearInterval(this.resyncTimer);
-    this.resyncTimer = undefined;
+    this.cancelResync?.();
+    this.cancelResync = undefined;
     this.recovery = {
       best: new Map(),
       offeredBy: new Set(),
       held: [],
-      maxTimer: setTimeout(() => this.finishRecovery(), this.options.recoveryMaxMs),
+      cancelMax: this.deps.clock.after(this.options.recoveryMaxMs, () => this.finishRecovery()),
     };
     this.transport.broadcast({ __bus: 1, kind: "recover" });
     this.checkRecoveryComplete();
@@ -572,8 +570,10 @@ export class RoomBus {
   private noteRecoveryActivity(): void {
     const recovery = this.recovery;
     if (!recovery) return;
-    clearTimeout(recovery.slideTimer);
-    recovery.slideTimer = setTimeout(() => this.finishRecovery(), this.options.recoveryWindowMs);
+    recovery.cancelSlide?.();
+    recovery.cancelSlide = this.deps.clock.after(this.options.recoveryWindowMs, () =>
+      this.finishRecovery()
+    );
     this.checkRecoveryComplete();
   }
 
@@ -588,8 +588,8 @@ export class RoomBus {
     const recovery = this.recovery;
     if (!recovery) return;
     this.recovery = undefined; // before publishing, so canPublish() is true
-    clearTimeout(recovery.slideTimer);
-    clearTimeout(recovery.maxTimer);
+    recovery.cancelSlide?.();
+    recovery.cancelMax();
 
     for (const channel of this.stateChannels.values()) {
       const offered = recovery.best.get(channel.id);
@@ -603,8 +603,8 @@ export class RoomBus {
 
   private endRecovery(): void {
     if (!this.recovery) return;
-    clearTimeout(this.recovery.slideTimer);
-    clearTimeout(this.recovery.maxTimer);
+    this.recovery.cancelSlide?.();
+    this.recovery.cancelMax();
     this.recovery = undefined;
   }
 
@@ -624,6 +624,6 @@ export class RoomBus {
     const next = this.computeStatus();
     if (next === this.status) return;
     this.status = next;
-    for (const handler of this.statusHandlers) handler(next);
+    this.statusChanged.emit(next);
   }
 }

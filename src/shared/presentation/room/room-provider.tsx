@@ -1,10 +1,9 @@
-// src/shared/presentation/room/room-provider.tsx
 "use client";
 
 import Link from "next/link";
 import { useEffect, useState, type ReactNode } from "react";
 import { useParams, useSearchParams } from "next/navigation";
-import { MultiplayerClient } from "@/shared/application/room";
+import { createMultiplayerClient } from "@/shared/application/room";
 import { GAMES } from "./games";
 import { RoomContext, useRoom, type RoomContextValue } from "./room-context";
 import { usePhase, useRoomStatus } from "./room-hooks";
@@ -60,7 +59,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     let cancelled = false;
-    const client = new MultiplayerClient({ games: GAMES });
+    const client = createMultiplayerClient({ games: GAMES });
     // Subscribed before joining, so a supersede during the join is never missed.
     const offSuperseded = client.onSessionSuperseded(() => setSuperseded(true));
     const offKicked = client.onKicked(() => setKicked(true));

@@ -1,4 +1,3 @@
-// src/shared/presentation/room/room-navigator.tsx
 // The one place that navigates because of room state. Pages never decide where
 // the room is: they render whatever route they are on, and this follows the
 // client's phase and active game.

@@ -1,4 +1,3 @@
-// application/game/game-definition.ts
 // Each game is one typed definition. Every part that touches the network is
 // validated by the game's own validators, and every reducer is a pure function
 // so a newly promoted host can keep the game running from replicated state.

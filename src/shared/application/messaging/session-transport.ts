@@ -1,4 +1,3 @@
-// application/messaging/session-transport.ts
 import type { PlayerSession } from "@/shared/infrastructure/player";
 import type { BusTransport } from "./types";
 
@@ -16,6 +15,6 @@ export function createSessionTransport(session: PlayerSession): BusTransport {
         if (peer.status === "active") handler(peer.signalingPeerId);
       }),
     isLinkActive: (peerId) => session.getPeerConnectionStatus(peerId) === "active",
-    getExpectedPeerIds: () => session.getPeerIds(), // new method, see infrastructure-patches.md
+    getExpectedPeerIds: () => session.getPeerIds(),
   };
 }

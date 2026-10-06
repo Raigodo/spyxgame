@@ -1,4 +1,3 @@
-// src/shared/presentation/room/games.ts
 // Adding a game = one line in each of the two lists below, plus its page.
 
 import { demoTap } from "@/demo-tap/demo-tap";

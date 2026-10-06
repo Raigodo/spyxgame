@@ -1,4 +1,3 @@
-// application/game/game-host-runtime.ts
 // Runs only on the host, only when the bus is ready. Idempotent: the client
 // calls reconcile() whenever the room state, bus status, host role or roster
 // changes, and it does nothing unless something is out of line.
@@ -10,6 +9,7 @@
 import type { StateChannel } from "@/shared/application/messaging";
 import type { RoomState } from "@/shared/application/room/room-state";
 import type { GameRuntime, SlotValue } from "./game-runtime";
+import type { Logger } from "@/shared/kernel";
 
 export interface GameHostEntry {
   runtime: GameRuntime;
@@ -21,6 +21,7 @@ export interface GameHostDeps {
   isHostReady(): boolean;
   getRoomState(): RoomState;
   getRosterPlayerIds(): string[];
+  logger: Logger;
 }
 
 export class GameHostRuntime {
@@ -58,7 +59,7 @@ export class GameHostRuntime {
         if (next !== slot) channel.publish(next);
       }
     } catch (error) {
-      console.warn("[GameHostRuntime] reconcile failed", error);
+      this.deps.logger.warn("reconcile failed", error);
     } finally {
       this.busy = false;
     }

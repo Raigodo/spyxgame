@@ -1,49 +1,35 @@
-import { SignalingPeerId } from "../signaling";
+import { Emitter } from "@/shared/kernel";
+import type { SignalingPeerId } from "../signaling";
 import type { PlayerProfile } from "./types";
-
-type PlayerHandler = (player: PlayerProfile) => void;
 
 export class PlayerDirectory {
   private readonly players = new Map<SignalingPeerId, PlayerProfile>();
-  private readonly joinedHandlers = new Set<PlayerHandler>();
-  private readonly updatedHandlers = new Set<PlayerHandler>();
-  private readonly leftHandlers = new Set<PlayerHandler>();
+  private readonly joined = new Emitter<PlayerProfile>();
+  private readonly updated = new Emitter<PlayerProfile>();
+  private readonly left = new Emitter<PlayerProfile>();
 
   upsert(profile: PlayerProfile): void {
     const existed = this.players.has(profile.peerId);
     this.players.set(profile.peerId, profile);
-
-    const handlers = existed ? this.updatedHandlers : this.joinedHandlers;
-    for (const handler of handlers) handler(profile);
+    (existed ? this.updated : this.joined).emit(profile);
   }
 
-  // Replaces the whole directory (used when a guest applies a full roster
-  // snapshot from the host), diffed against the previous contents so
-  // joined/updated/left events still fire correctly for consumers.
-  //
-  // Stale ids are snapshotted up front rather than filtered while walking
-  // `this.players.values()` — deleting the *current* key mid-iteration is
-  // spec-safe, but deleting arbitrary other keys while iterating invites
-  // exactly the kind of "is this still correct if I touch it later" doubt
-  // this class shouldn't leave lying around.
+  // Replaces the whole directory (a guest applying the host's roster snapshot), diffed against
+  // the previous contents so joined/updated/left still fire correctly. Stale ids are collected
+  // up front, so nothing is deleted while iterating.
   replaceAll(profiles: PlayerProfile[]): void {
     const incomingIds = new Set(profiles.map((p) => p.peerId));
     const staleIds = Array.from(this.players.keys()).filter((id) => !incomingIds.has(id));
 
-    for (const profile of profiles) {
-      this.upsert(profile);
-    }
-
-    for (const id of staleIds) {
-      this.remove(id);
-    }
+    for (const profile of profiles) this.upsert(profile);
+    for (const id of staleIds) this.remove(id);
   }
 
   remove(peerId: SignalingPeerId): void {
     const profile = this.players.get(peerId);
     if (!profile) return;
     this.players.delete(peerId);
-    for (const handler of this.leftHandlers) handler(profile);
+    this.left.emit(profile);
   }
 
   get(peerId: SignalingPeerId): PlayerProfile | undefined {
@@ -55,24 +41,20 @@ export class PlayerDirectory {
   }
 
   clear(): void {
-    for (const profile of this.players.values()) {
-      for (const handler of this.leftHandlers) handler(profile);
-    }
+    const all = this.getAll();
     this.players.clear();
+    for (const profile of all) this.left.emit(profile);
   }
 
-  onPlayerJoined(handler: PlayerHandler): () => void {
-    this.joinedHandlers.add(handler);
-    return () => this.joinedHandlers.delete(handler);
+  onPlayerJoined(handler: (player: PlayerProfile) => void): () => void {
+    return this.joined.on(handler);
   }
 
-  onPlayerUpdated(handler: PlayerHandler): () => void {
-    this.updatedHandlers.add(handler);
-    return () => this.updatedHandlers.delete(handler);
+  onPlayerUpdated(handler: (player: PlayerProfile) => void): () => void {
+    return this.updated.on(handler);
   }
 
-  onPlayerLeft(handler: PlayerHandler): () => void {
-    this.leftHandlers.add(handler);
-    return () => this.leftHandlers.delete(handler);
+  onPlayerLeft(handler: (player: PlayerProfile) => void): () => void {
+    return this.left.on(handler);
   }
 }

@@ -1,4 +1,3 @@
-// application/room/room-state.ts
 // The one replicated room-level value. Owned by the host, carried by a
 // RoomBus state channel, validated here because it arrives over the network.
 

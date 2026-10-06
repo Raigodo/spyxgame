@@ -1,4 +1,3 @@
-// src/shared/presentation/room/room-hooks.ts
 // The only React-specific glue: each hook is one useSyncExternalStore over a
 // client getter and its matching callback. No logic lives here.
 "use client";

@@ -1,4 +1,4 @@
-import { ConsoleLogger, CryptoIdGenerator, DEFAULT_CONFIG, SystemClock } from "@/shared/kernel";
+import { ConsoleLogger, DEFAULT_CONFIG, SystemClock, UlidIdGenerator } from "@/shared/kernel";
 import { FirestoreHostElectionAdapter } from "./adapters/firestore/firestore-host-election-adapter";
 import { firestoreClient } from "./adapters/firestore/firestore-client";
 import { FirestoreRoomMembershipAdapter } from "./adapters/firestore/firestore-room-membership-adapter";
@@ -16,15 +16,16 @@ export type { SignalInboxPort } from "./ports/signal-inbox-port";
 export function createSignalingSession(
   overrides: Partial<SignalingSessionDeps> = {}
 ): SignalingSession {
+  const clock = overrides.clock ?? new SystemClock();
   const logger = overrides.logger ?? new ConsoleLogger("signaling");
   return new SignalingSession({
     membership: new FirestoreRoomMembershipAdapter(firestoreClient, logger.child("membership")),
     messages: new FirestoreSignalInboxAdapter(firestoreClient),
     election: new FirestoreHostElectionAdapter(firestoreClient),
-    clock: new SystemClock(),
-    ids: new CryptoIdGenerator(),
-    logger,
     config: DEFAULT_CONFIG.signaling,
     ...overrides,
+    clock,
+    ids: overrides.ids ?? new UlidIdGenerator(clock),
+    logger,
   });
 }

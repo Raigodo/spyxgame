@@ -2,13 +2,12 @@ export { Emitter } from "./emitter";
 export type { Unsubscribe } from "./emitter";
 export { SystemClock } from "./clock";
 export type { Cancel, Clock } from "./clock";
-export { CryptoIdGenerator } from "./id-generator";
 export type { IdGenerator } from "./id-generator";
+export { UlidIdGenerator } from "./ulid-id-generator";
 export { ConsoleLogger, defaultLogLevel } from "./console-logger";
 export { NullLogger } from "./null-logger";
 export type { Logger, LogLevel } from "./logger";
 export { DEFAULT_CONFIG, createConfig } from "./config";
-export type { ProfileConfig } from "./config";
 export type {
   AppConfig,
   BusConfig,
@@ -16,6 +15,7 @@ export type {
   ConfigOverrides,
   IceServerConfig,
   PresenceConfig,
+  ProfileConfig,
   SignalingConfig,
   WebRtcConfig,
 } from "./config";

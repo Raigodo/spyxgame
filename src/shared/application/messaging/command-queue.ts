@@ -1,8 +1,8 @@
-// application/messaging/command-queue.ts
 // Sender-side, in-memory. Holds commands until the host acks them, the TTL
 // elapses, or the client leaves. Knows nothing about networking: the bus
 // decides when to (re)send and records it with markSent().
 
+import type { Cancel, Clock } from "@/shared/kernel";
 import type { CommandResult, PeerId } from "./types";
 
 export interface QueuedCommand {
@@ -18,20 +18,21 @@ export interface QueuedCommand {
 interface Entry {
   cmd: QueuedCommand;
   resolve: (result: CommandResult) => void;
-  timer: ReturnType<typeof setTimeout>;
+  cancelTimer: Cancel;
 }
 
 export class CommandQueue {
   // Map preserves insertion order, which is sequence order.
   private readonly entries = new Map<string, Entry>();
 
+  constructor(private readonly clock: Clock) {}
+
   enqueue(cmd: QueuedCommand, ttlMs: number): Promise<CommandResult> {
     return new Promise((resolve) => {
-      const timer = setTimeout(
-        () => this.settle(cmd.id, { ok: false, kind: "expired", reason: "no ack before TTL" }),
-        ttlMs
+      const cancelTimer = this.clock.after(ttlMs, () =>
+        this.settle(cmd.id, { ok: false, kind: "expired", reason: "no ack before TTL" })
       );
-      this.entries.set(cmd.id, { cmd, resolve, timer });
+      this.entries.set(cmd.id, { cmd, resolve, cancelTimer });
     });
   }
 
@@ -66,7 +67,7 @@ export class CommandQueue {
   private settle(id: string, result: CommandResult): void {
     const entry = this.entries.get(id);
     if (!entry) return;
-    clearTimeout(entry.timer);
+    entry.cancelTimer();
     this.entries.delete(id);
     entry.resolve(result);
   }

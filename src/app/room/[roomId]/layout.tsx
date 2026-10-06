@@ -1,4 +1,3 @@
-// src/app/room/[roomId]/layout.tsx
 import { Suspense, type ReactNode } from "react";
 import { RoomProvider } from "@/shared/presentation/room/room-provider";
 

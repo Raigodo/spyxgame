@@ -1,4 +1,3 @@
-// application/game/game-runtime.ts
 // Turns a typed GameSpec into a non-generic GameRuntime. The registry, the
 // client and the host reconciler only ever see GameRuntime, so heterogeneous
 // games can sit in one map without `any`.
@@ -120,8 +119,7 @@ export function createRuntime<C, S, Cmds extends object, Evs extends object, M e
     },
 
     installCommands(channel) {
-      for (const name of Object.keys(commands)) {
-        const def = commands[name];
+      for (const [name, def] of Object.entries(commands)) {
         channel.handle<unknown>(name, {
           validate: (raw) => def.validate(raw),
           authorize: ({ state, isHostSender, playerId }) => {

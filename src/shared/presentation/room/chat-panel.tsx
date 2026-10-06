@@ -1,4 +1,3 @@
-// src/shared/presentation/room/chat-panel.tsx
 // Built-in room chat: the same component in the lobby and in every game.
 "use client";
 

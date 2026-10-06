@@ -1,4 +1,4 @@
-// application/messaging/types.ts
+import type { BusConfig } from "@/shared/kernel";
 
 export type PeerId = string;
 
@@ -7,16 +7,7 @@ export type CommandResult =
 
 export type BusStatus = "syncing" | "ready";
 
-export interface BusOptions {
-  /** How long a command may wait for the host's ack before resolving "expired". */
-  commandTtlMs: number;
-  /** After a promotion: quiet period (reset by each new link/offer) before publishing. */
-  recoveryWindowMs: number;
-  /** After a promotion: absolute cap, in case no link ever comes up. */
-  recoveryMaxMs: number;
-  /** While a guest is unsynced with an active host link, how often it re-requests snapshots. */
-  resyncIntervalMs: number;
-}
+export type BusOptions = BusConfig;
 
 /**
  * The only thing the bus needs from the layers below. Keeps the bus free of

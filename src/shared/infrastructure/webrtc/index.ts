@@ -1,4 +1,4 @@
-import { ConsoleLogger, CryptoIdGenerator, DEFAULT_CONFIG, SystemClock } from "@/shared/kernel";
+import { ConsoleLogger, DEFAULT_CONFIG, SystemClock, UlidIdGenerator } from "@/shared/kernel";
 import { createSignalingSession } from "../signaling";
 import { BrowserRtcConnectionProvider } from "./adapters/browser/browser-rtc-connection-provider";
 import { ChunkedMessenger, type ChunkedMessengerDeps } from "./chunked-messenger";
@@ -22,10 +22,11 @@ export type {
 
 export function createWebRtcService(overrides: Partial<WebRtcServiceDeps> = {}): WebRtcService {
   const config = overrides.config ?? DEFAULT_CONFIG.webrtc;
+  const clock = overrides.clock ?? new SystemClock();
   return new WebRtcService({
-    clock: new SystemClock(),
-    ids: new CryptoIdGenerator(),
     ...overrides,
+    clock,
+    ids: overrides.ids ?? new UlidIdGenerator(clock),
     logger: overrides.logger ?? new ConsoleLogger("webrtc"),
     config,
     session: overrides.session ?? createSignalingSession(),
@@ -37,11 +38,12 @@ export function createChunkedMessenger(
   rtc: WebRtcService,
   overrides: Partial<ChunkedMessengerDeps> = {}
 ): ChunkedMessenger {
+  const clock = overrides.clock ?? new SystemClock();
   return new ChunkedMessenger({
-    rtc,
-    clock: new SystemClock(),
-    ids: new CryptoIdGenerator(),
     config: DEFAULT_CONFIG.webrtc,
     ...overrides,
+    rtc,
+    clock,
+    ids: overrides.ids ?? new UlidIdGenerator(clock),
   });
 }

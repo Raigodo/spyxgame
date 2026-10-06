@@ -1,4 +1,3 @@
-// src/app/room/[roomId]/demo-game/page.tsx   (tap race)
 "use client";
 
 import { useEffect, useState } from "react";

@@ -1,18 +1,10 @@
-// application/chat/chat-service.ts
-// Built-in room feature: works the same in the lobby and in any game. Messages
-// travel on a bus event channel (ephemeral, no replay). History lives here, so
-// it survives page navigation inside the room. It does not survive a refresh,
-// and late joiners don't see earlier messages.
+// Built-in room feature: works the same in the lobby and in any game. Messages travel on a bus
+// event channel (ephemeral, no replay). History lives here, so it survives page navigation
+// inside the room. It does not survive a refresh, and late joiners don't see earlier messages.
 
+import { Emitter, shortId, type ChatConfig, type Clock, type IdGenerator } from "@/shared/kernel";
 import type { EventChannel, RoomBus } from "@/shared/application/messaging";
 import { RateLimiter } from "./rate-limiter";
-
-/** Generous on purpose: a burst of 10, then 1 message per second sustained. */
-export const CHAT_BURST = 30;
-export const CHAT_REFILL_PER_SECOND = 1;
-
-export const MAX_CHAT_TEXT_LENGTH = 500;
-export const MAX_CHAT_HISTORY = 200;
 
 export type ChatSendResult = "sent" | "invalid" | "not-ready" | "rate-limited";
 
@@ -33,6 +25,10 @@ export interface ChatLine {
 }
 
 export interface ChatDeps {
+  bus: RoomBus;
+  clock: Clock;
+  ids: IdGenerator;
+  config: ChatConfig;
   getLocalPeerId(): string | undefined;
   resolveSender(peerId: string): { playerId: string; nickname: string } | undefined;
   /** Sending is refused while the room is re-syncing (e.g. during a host change). */
@@ -44,32 +40,29 @@ interface ChatPayload {
   direct: boolean;
 }
 
-// Network input: never trust its shape.
-function parsePayload(v: unknown): ChatPayload | undefined {
-  if (typeof v !== "object" || v === null) return undefined;
-  const r = v as Record<string, unknown>;
-  if (typeof r.text !== "string") return undefined;
-  const text = r.text.trim();
-  if (!text || text.length > MAX_CHAT_TEXT_LENGTH) return undefined;
-  return { text, direct: r.direct === true };
-}
-
-const short = (id: string) => id.slice(0, 8);
-
 export class ChatService {
   private readonly channel: EventChannel<ChatPayload>;
   private readonly unsubscribe: () => void;
-  private readonly handlers = new Set<(line: ChatLine) => void>();
+  private readonly messageReceived = new Emitter<ChatLine>();
   // Replaced (never mutated) on each message, so the reference is stable between messages.
   private history: readonly ChatLine[] = [];
-  private readonly sendLimiter = new RateLimiter(CHAT_BURST, CHAT_REFILL_PER_SECOND);
-  private readonly receiveLimiter = new RateLimiter(CHAT_BURST, CHAT_REFILL_PER_SECOND);
+  private readonly sendLimiter: RateLimiter;
+  private readonly receiveLimiter: RateLimiter;
 
-  constructor(
-    bus: RoomBus,
-    private readonly deps: ChatDeps
-  ) {
-    this.channel = bus.eventChannel<ChatPayload>({ id: "chat", validate: parsePayload });
+  constructor(private readonly deps: ChatDeps) {
+    const { bus, clock, config } = deps;
+    const limiter = {
+      clock,
+      capacity: config.burst,
+      refillPerSecond: config.refillPerSecond,
+    };
+    this.sendLimiter = new RateLimiter(limiter);
+    this.receiveLimiter = new RateLimiter(limiter);
+
+    this.channel = bus.eventChannel<ChatPayload>({
+      id: "chat",
+      validate: (raw) => this.parsePayload(raw),
+    });
     this.unsubscribe = this.channel.onEvent((payload, from) => this.receive(payload, from));
   }
 
@@ -78,17 +71,15 @@ export class ChatService {
   }
 
   onMessage(handler: (line: ChatLine) => void): () => void {
-    this.handlers.add(handler);
-    return () => {
-      this.handlers.delete(handler);
-    };
+    return this.messageReceived.on(handler);
   }
 
-  /** Returns false (nothing sent) if the text is empty or too long, the target is yourself, or the room is not ready. */
+  /** Anything other than "sent" means nothing went out: empty or too long text, a message to yourself, room not ready, or rate-limited. */
   send(text: string, toPeerId?: string): ChatSendResult {
+    const { ids, clock, config } = this.deps;
     const local = this.deps.getLocalPeerId();
     const clean = text.trim();
-    if (!local || !clean || clean.length > MAX_CHAT_TEXT_LENGTH || toPeerId === local) {
+    if (!local || !clean || clean.length > config.maxTextLength || toPeerId === local) {
       return "invalid";
     }
     if (!this.deps.isReady()) return "not-ready";
@@ -104,45 +95,55 @@ export class ChatService {
     const me = this.deps.resolveSender(local);
     const target = this.deps.resolveSender(toPeerId);
     this.append({
-      id: crypto.randomUUID(),
+      id: ids.next(),
       fromPeerId: local,
       fromPlayerId: me?.playerId,
-      fromName: me?.nickname ?? short(local),
+      fromName: me?.nickname ?? shortId(local),
       toPeerId,
-      toName: target?.nickname ?? short(toPeerId),
+      toName: target?.nickname ?? shortId(toPeerId),
       text: clean,
       direct: true,
       mine: true,
-      at: Date.now(),
+      at: clock.now(),
     });
     return "sent";
   }
 
   dispose(): void {
     this.unsubscribe();
-    this.handlers.clear();
+    this.messageReceived.clear();
+  }
+
+  // Network input: never trust its shape.
+  private parsePayload(v: unknown): ChatPayload | undefined {
+    if (typeof v !== "object" || v === null) return undefined;
+    const r = v as Record<string, unknown>;
+    if (typeof r.text !== "string") return undefined;
+    const text = r.text.trim();
+    if (!text || text.length > this.deps.config.maxTextLength) return undefined;
+    return { text, direct: r.direct === true };
   }
 
   private receive(payload: ChatPayload, from: string): void {
-    // Our own messages were already limited on send. Everyone else's are checked here,
-    // because a modified client can ignore its own limit.
+    // Our own messages were already limited on send. Everyone else's are checked here, because
+    // a modified client can ignore its own limit.
     if (from !== this.deps.getLocalPeerId() && !this.receiveLimiter.tryTake(from)) return;
 
     const sender = this.deps.resolveSender(from);
     this.append({
-      id: crypto.randomUUID(),
+      id: this.deps.ids.next(),
       fromPeerId: from,
       fromPlayerId: sender?.playerId,
-      fromName: sender?.nickname ?? short(from),
+      fromName: sender?.nickname ?? shortId(from),
       text: payload.text,
       direct: payload.direct,
       mine: from === this.deps.getLocalPeerId(),
-      at: Date.now(),
+      at: this.deps.clock.now(),
     });
   }
 
   private append(line: ChatLine): void {
-    this.history = [...this.history, line].slice(-MAX_CHAT_HISTORY);
-    for (const handler of Array.from(this.handlers)) handler(line);
+    this.history = [...this.history, line].slice(-this.deps.config.maxHistory);
+    this.messageReceived.emit(line);
   }
 }

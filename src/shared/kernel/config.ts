@@ -1,5 +1,3 @@
-// src/shared/kernel/config.ts
-
 /** Same shape as RTCIceServer, without DOM types. Add a TURN entry here when STUN is not enough. */
 export interface IceServerConfig {
   urls: string | readonly string[];
@@ -76,7 +74,7 @@ export const DEFAULT_CONFIG: AppConfig = {
     linkWaitMs: 8_000,
   },
   chat: {
-    burst: 30,
+    burst: 10,
     refillPerSecond: 1,
     maxTextLength: 500,
     maxHistory: 200,

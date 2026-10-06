@@ -1,4 +1,3 @@
-// application/room/room-state-service.ts
 // Owns the "room" state channel and its coordination commands. All three are
 // host-only and are pure reducers, so a newly promoted host keeps working
 // from the replicated state alone.
@@ -16,7 +15,7 @@ import {
 } from "./room-state";
 
 export interface RoomStateOptions {
-  /** Host-side check for a game start. Return a reason string to reject. Wired to the game registry in step 5. */
+  /** Host-side check for a game start. Return a reason string to reject. */
   validateGame?: (id: string, config: unknown, context: GameContext) => string | undefined;
 }
 

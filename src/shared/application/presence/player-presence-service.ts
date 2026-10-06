@@ -1,77 +1,92 @@
+import {
+  Emitter,
+  type Clock,
+  type IdGenerator,
+  type Logger,
+  type PresenceConfig,
+} from "@/shared/kernel";
+import type { RoomBus } from "@/shared/application/messaging";
 import type { PlayerProfile, PlayerSession } from "@/shared/infrastructure/player";
+import type { SignalingPeerId } from "@/shared/infrastructure/signaling";
 import { PlayerReconnectionCoordinator } from "./player-reconnection-coordinator";
 import type { RosterPlayer } from "./types";
-import { RoomBus } from "../messaging";
-import { SignalingPeerId } from "@/shared/infrastructure/signaling";
 
-type RosterPlayerHandler = (player: RosterPlayer) => void;
-type SupersededHandler = () => void;
+export interface PlayerPresenceServiceDeps {
+  session: PlayerSession;
+  bus: RoomBus;
+  clock: Clock;
+  ids: IdGenerator;
+  logger: Logger;
+  config: PresenceConfig;
+}
 
-// The single shared read-model for "who's in the room right now, with what
-// connection status." Constructed once, right after PlayerSession.join(),
-// and handed to whatever needs it — the lobby, then the game, then whatever
-// comes after that — for as long as the player stays in the room. None of
-// those consumers implement their own reconnect / duplicate-session /
-// status-broadcast logic; it all lives in PlayerReconnectionCoordinator,
-// wrapped here, disposed once, when the room is actually left.
+// The single shared read-model for "who's in the room right now, with what connection status."
+// Constructed once, right after PlayerSession.join(), and handed to whatever needs it (the
+// lobby, then the game, ...) for as long as the player stays in the room. None of those
+// consumers implement their own reconnect / duplicate-session / status-broadcast logic; it all
+// lives in PlayerReconnectionCoordinator, wrapped here, disposed once when the room is left.
 export class PlayerPresenceService {
+  private readonly session: PlayerSession;
+  private readonly log: Logger;
   private readonly reconnection: PlayerReconnectionCoordinator;
-  private readonly joinedHandlers = new Set<RosterPlayerHandler>();
-  private readonly rejoinedHandlers = new Set<RosterPlayerHandler>();
-  private readonly updatedHandlers = new Set<RosterPlayerHandler>();
-  private readonly leftHandlers = new Set<RosterPlayerHandler>();
+  private readonly joined = new Emitter<RosterPlayer>();
+  private readonly rejoined = new Emitter<RosterPlayer>();
+  private readonly updated = new Emitter<RosterPlayer>();
+  private readonly left = new Emitter<RosterPlayer>();
   private readonly cleanupFns: Array<() => void> = [];
 
-  constructor(
-    private readonly session: PlayerSession,
-    bus: RoomBus
-  ) {
-    this.reconnection = new PlayerReconnectionCoordinator(session, bus);
+  constructor(deps: PlayerPresenceServiceDeps) {
+    const { session, bus, clock, ids, logger, config } = deps;
+    this.session = session;
+    this.log = logger;
+    this.reconnection = new PlayerReconnectionCoordinator({
+      session,
+      bus,
+      clock,
+      ids,
+      logger: logger.child("reconnection"),
+      config,
+    });
 
     this.cleanupFns.push(
-      // A genuinely new player and a returning one both arrive through
-      // PlayerSession's single onPlayerJoined event — the reconnection
-      // coordinator has already decided which, by the time this fires (it
-      // subscribes first, inside its own constructor, above). A newcomer
-      // currently being arbitrated as a duplicate is suppressed here
-      // entirely — its join event fires later, via onPeerRevealed, if it
-      // turns out to be the side that survives. The local player is exempt
-      // from suppression: a peer waiting on its own arbitration outcome
-      // must still see its own join fire normally.
+      // A genuinely new player and a returning one both arrive through PlayerSession's single
+      // onPlayerJoined event; the reconnection coordinator has already decided which by the time
+      // this fires (it subscribed first, inside its own constructor). A newcomer currently being
+      // arbitrated as a duplicate is suppressed entirely: its join event fires later, via
+      // onPeerRevealed, if it turns out to be the side that survives. The local player is exempt:
+      // a peer waiting on its own arbitration outcome must still see its own join fire normally.
       session.onPlayerJoined((p) => {
         const localPeerId = session.getLocalPlayer()?.peerId;
         if (p.peerId !== localPeerId && this.reconnection.isHiddenDuringArbitration(p.peerId)) {
           return;
         }
         const { returning } = this.reconnection.getPresence(p.peerId);
-        this.emit(returning ? this.rejoinedHandlers : this.joinedHandlers, p);
+        this.emit(returning ? this.rejoined : this.joined, p);
       }),
-      session.onPlayerUpdated((p) => this.emit(this.updatedHandlers, p)),
-      session.onPlayerLeft((p) => this.emit(this.leftHandlers, p)),
+      session.onPlayerUpdated((p) => this.emit(this.updated, p)),
+      session.onPlayerLeft((p) => this.emit(this.left, p)),
 
       this.reconnection.onPeerRevealed((peerId) => {
         const profile = this.session.getPlayers().find((p) => p.peerId === peerId);
         if (!profile) return;
         const { returning } = this.reconnection.getPresence(peerId);
-        this.emit(returning ? this.rejoinedHandlers : this.joinedHandlers, profile);
+        this.emit(returning ? this.rejoined : this.joined, profile);
       }),
 
-      // Connection status / returning flips don't flow through
-      // PlayerSession's own profile events, so re-project everyone as
-      // "updated" whenever presence data changes (this also covers a
-      // reconnecting → normal status flip once arbitration resolves).
+      // Connection status / returning flips don't flow through PlayerSession's own profile
+      // events, so re-project everyone as "updated" whenever presence data changes (this also
+      // covers a reconnecting -> normal status flip once arbitration resolves).
       this.reconnection.onChanged(() => {
         for (const profile of this.session.getPlayers()) {
           if (this.reconnection.isHiddenDuringArbitration(profile.peerId)) continue;
-          this.emit(this.updatedHandlers, profile);
+          this.emit(this.updated, profile);
         }
       })
     );
   }
 
-  // Bound to room membership, not to any particular app phase — call this
-  // when the player actually leaves the room, not when the lobby (or the
-  // game) is merely done with it.
+  // Bound to room membership, not to any app phase: call this when the player actually leaves
+  // the room, not when the lobby (or the game) is merely done with it.
   dispose(): void {
     for (const cleanup of this.cleanupFns) cleanup();
     this.cleanupFns.length = 0;
@@ -99,37 +114,40 @@ export class PlayerPresenceService {
 
   setLocalMetadata(metadata: Record<string, unknown>): void {
     if (this.reconnection.isLocalPending()) {
-      console.warn("[PlayerPresenceService] Ignoring metadata change while reconnecting");
+      this.log.warn("Ignoring metadata change while reconnecting");
       return;
     }
     this.session.updateLocalProfile({ metadata });
   }
 
-  onPlayerJoined(handler: RosterPlayerHandler): () => void {
-    this.joinedHandlers.add(handler);
-    return () => this.joinedHandlers.delete(handler);
+  isLocalPending(): boolean {
+    return this.reconnection.isLocalPending();
   }
 
-  onPlayerRejoined(handler: RosterPlayerHandler): () => void {
-    this.rejoinedHandlers.add(handler);
-    return () => this.rejoinedHandlers.delete(handler);
+  onPlayerJoined(handler: (player: RosterPlayer) => void): () => void {
+    return this.joined.on(handler);
   }
 
-  onPlayerUpdated(handler: RosterPlayerHandler): () => void {
-    this.updatedHandlers.add(handler);
-    return () => this.updatedHandlers.delete(handler);
+  onPlayerRejoined(handler: (player: RosterPlayer) => void): () => void {
+    return this.rejoined.on(handler);
   }
 
-  onPlayerLeft(handler: RosterPlayerHandler): () => void {
-    this.leftHandlers.add(handler);
-    return () => this.leftHandlers.delete(handler);
+  onPlayerUpdated(handler: (player: RosterPlayer) => void): () => void {
+    return this.updated.on(handler);
   }
 
-  // Fires on whichever side the host's duplicate-session arbitration
-  // rejects. Relevant for the whole room lifetime, not just the lobby — so
-  // subscribe to it once, independent of lobby/game phase, rather than
-  // through whatever screen happens to be active when it fires.
-  onSessionSuperseded(handler: SupersededHandler): () => void {
+  onPlayerLeft(handler: (player: RosterPlayer) => void): () => void {
+    return this.left.on(handler);
+  }
+
+  // Fires whenever presence data changes, including pending -> ready.
+  onPresenceChanged(handler: () => void): () => void {
+    return this.reconnection.onChanged(handler);
+  }
+
+  // Fires on whichever side the host's duplicate-session arbitration rejects. Relevant for the
+  // whole room lifetime, so subscribe once, independent of lobby/game phase.
+  onSessionSuperseded(handler: () => void): () => void {
     return this.reconnection.onSessionSuperseded(handler);
   }
 
@@ -139,13 +157,12 @@ export class PlayerPresenceService {
   }
 
   /** Fires on the player the host removed. */
-  onKicked(handler: SupersededHandler): () => void {
+  onKicked(handler: () => void): () => void {
     return this.reconnection.onKicked(handler);
   }
 
-  private emit(handlers: Set<RosterPlayerHandler>, profile: PlayerProfile): void {
-    const player = this.toRosterPlayer(profile);
-    for (const handler of handlers) handler(player);
+  private emit(emitter: Emitter<RosterPlayer>, profile: PlayerProfile): void {
+    emitter.emit(this.toRosterPlayer(profile));
   }
 
   private toRosterPlayer(profile: PlayerProfile): RosterPlayer {
@@ -159,14 +176,5 @@ export class PlayerPresenceService {
       connectionStatus: presence.status,
       returning: presence.returning,
     };
-  }
-
-  isLocalPending(): boolean {
-    return this.reconnection.isLocalPending();
-  }
-
-  // Fires whenever presence data changes, including pending → ready.
-  onPresenceChanged(handler: () => void): () => void {
-    return this.reconnection.onChanged(handler);
   }
 }

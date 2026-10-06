@@ -1,4 +1,3 @@
-// src/app/room/page.tsx   (create or join by code)
 "use client";
 
 import { useState } from "react";

@@ -1,4 +1,3 @@
-// application/games/demo-tap/demo-tap.ts
 // Tap race: first participant to reach `goal` taps wins. Supports both lobby
 // modes (the UI computes team totals from context.teams), uses an ephemeral
 // emote event, and admits late joiners in free-for-all but not in teams.

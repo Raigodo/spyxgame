@@ -1,9 +1,10 @@
-import { createChunkedMessenger, type ChunkedMessenger } from "../webrtc";
+import { Emitter, type Logger } from "@/shared/kernel";
+import type { RoomId, SignalingPeerId } from "../signaling";
+import type { ChunkedMessenger } from "../webrtc";
+import type { HostTransferResult, RtcPeer, RtcPeerStatus } from "../webrtc/types";
+import type { WebRtcService } from "../webrtc/web-rtc-service";
 import { PlayerDirectory } from "./player-directory";
-import { WebRtcService } from "../webrtc/web-rtc-service";
-import { RoomId, SignalingPeerId } from "../signaling";
 import type { LocalProfileInput, PlayerProfile } from "./types";
-import { HostTransferResult, RtcPeer, RtcPeerStatus } from "../webrtc/types";
 
 type Envelope =
   | { kind: "profile"; profile: PlayerProfile }
@@ -17,20 +18,29 @@ type Envelope =
       payload: unknown;
     };
 
-type AppMessageHandler = (payload: unknown, from: SignalingPeerId) => void;
-type PlayerHandler = (player: PlayerProfile) => void;
-type HostChangedHandler = (hostPeerId: SignalingPeerId | undefined) => void;
+export interface PlayerSessionDeps {
+  rtc: WebRtcService;
+  messenger: ChunkedMessenger;
+  logger: Logger;
+}
 
+// Star topology: the host connects to every guest, guests only talk to the host, and the host
+// relays broadcasts and direct messages after stamping the verified sender.
 export class PlayerSession {
+  private readonly rtc: WebRtcService;
   private readonly messenger: ChunkedMessenger;
+  private readonly log: Logger;
+
   private readonly directory = new PlayerDirectory();
-  private readonly appMessageHandlers = new Set<AppMessageHandler>();
+  private readonly appMessage = new Emitter<{ payload: unknown; from: SignalingPeerId }>();
   private readonly cleanupFns: Array<() => void> = [];
 
   private localProfile?: PlayerProfile;
 
-  constructor(private readonly rtc: WebRtcService) {
-    this.messenger = createChunkedMessenger(rtc);
+  constructor(deps: PlayerSessionDeps) {
+    this.rtc = deps.rtc;
+    this.messenger = deps.messenger;
+    this.log = deps.logger;
   }
 
   // ─── Public API ───────────────────────────────────────────────────────────
@@ -41,7 +51,7 @@ export class PlayerSession {
     options: { peerId?: SignalingPeerId; formerHostPeerId?: SignalingPeerId } = {}
   ): Promise<void> {
     this.messenger.start();
-    this.wireListeners(); // subscribe before joinRoom — avoids missing early events
+    this.wireListeners(); // subscribe before joinRoom: avoids missing early events
 
     await this.rtc.joinRoom(roomId, options.peerId, { formerHostPeerId: options.formerHostPeerId });
 
@@ -53,11 +63,8 @@ export class PlayerSession {
     };
     this.directory.upsert(this.localProfile);
 
-    if (this.rtc.isHost()) {
-      this.broadcastRoster();
-    } else {
-      this.announceProfileToHost();
-    }
+    if (this.rtc.isHost()) this.broadcastRoster();
+    else this.announceProfileToHost();
   }
 
   async leave(): Promise<void> {
@@ -69,10 +76,9 @@ export class PlayerSession {
     await this.rtc.leaveRoom();
   }
 
-  // Forcibly removes another player. Host-only. Purely mechanical — sends no
-  // notice to the removed player. Callers that want the removed player to
-  // get a chance to clean up gracefully (like the presence layer's
-  // arbitration) should message them first.
+  // Forcibly removes another player. Host-only. Purely mechanical: sends no notice to the
+  // removed player. Callers that want them to clean up gracefully (the presence layer's
+  // arbitration and kick) should message them first.
   async hostRemovePeer(peerId: SignalingPeerId): Promise<void> {
     if (!this.isHost()) {
       throw new Error("[PlayerSession] Only the host can remove another player.");
@@ -102,16 +108,12 @@ export class PlayerSession {
     return this.rtc.getPeers().map((p) => p.signalingPeerId);
   }
 
-  // Fires whenever the host changes (elected, re-elected, or cleared). Lets
-  // consumers react to host/role changes instead of polling isHost() /
-  // getHostPeerId(). Underlying event already existed on WebRtcService —
-  // this just re-exposes it at the layer everything else talks to.
-  onHostChanged(handler: HostChangedHandler): () => void {
+  // Fires whenever the host changes (elected, re-elected, or cleared).
+  onHostChanged(handler: (hostPeerId: SignalingPeerId | undefined) => void): () => void {
     return this.rtc.onHostChanged(handler);
   }
 
-  // Shallow-merges metadata so games can update one field (e.g. `ready`)
-  // without resending the whole bag.
+  // Shallow-merges metadata so games can update one field (e.g. `ready`) without resending the bag.
   updateLocalProfile(patch: Partial<LocalProfileInput>): void {
     if (!this.localProfile) return;
 
@@ -125,22 +127,19 @@ export class PlayerSession {
     };
     this.directory.upsert(this.localProfile);
 
-    if (this.rtc.isHost()) {
-      this.broadcastRoster();
-    } else {
-      this.announceProfileToHost();
-    }
+    if (this.rtc.isHost()) this.broadcastRoster();
+    else this.announceProfileToHost();
   }
 
-  onPlayerJoined(handler: PlayerHandler): () => void {
+  onPlayerJoined(handler: (player: PlayerProfile) => void): () => void {
     return this.directory.onPlayerJoined(handler);
   }
 
-  onPlayerUpdated(handler: PlayerHandler): () => void {
+  onPlayerUpdated(handler: (player: PlayerProfile) => void): () => void {
     return this.directory.onPlayerUpdated(handler);
   }
 
-  onPlayerLeft(handler: PlayerHandler): () => void {
+  onPlayerLeft(handler: (player: PlayerProfile) => void): () => void {
     return this.directory.onPlayerLeft(handler);
   }
 
@@ -149,17 +148,11 @@ export class PlayerSession {
     if (!from) return;
 
     if (targetPeerId === from) {
-      this.emitApp(payload, from);
+      this.appMessage.emit({ payload, from });
       return;
     }
 
-    const envelope: Envelope = {
-      kind: "app",
-      scope: "direct",
-      from,
-      to: targetPeerId,
-      payload,
-    };
+    const envelope: Envelope = { kind: "app", scope: "direct", from, to: targetPeerId, payload };
 
     if (this.rtc.isHost()) {
       this.messenger.sendToPeer(targetPeerId, JSON.stringify(envelope));
@@ -174,31 +167,20 @@ export class PlayerSession {
     const from = this.rtc.getLocalPeerId();
     if (!from) return;
 
+    const envelope: Envelope = { kind: "app", scope: "broadcast", from, payload };
+
     if (this.rtc.isHost()) {
-      const envelope: Envelope = {
-        kind: "app",
-        scope: "broadcast",
-        from,
-        payload,
-      };
       this.messenger.broadcast(JSON.stringify(envelope));
-      this.emitApp(payload, from); // host has no RTC link to itself — deliver locally too
+      this.appMessage.emit({ payload, from }); // host has no RTC link to itself: deliver locally too
     } else {
       const hostPeerId = this.rtc.getHostPeerId();
       if (!hostPeerId) return;
-      const envelope: Envelope = {
-        kind: "app",
-        scope: "broadcast",
-        from,
-        payload,
-      };
       this.messenger.sendToPeer(hostPeerId, JSON.stringify(envelope));
     }
   }
 
-  onMessage(handler: AppMessageHandler): () => void {
-    this.appMessageHandlers.add(handler);
-    return () => this.appMessageHandlers.delete(handler);
+  onMessage(handler: (payload: unknown, from: SignalingPeerId) => void): () => void {
+    return this.appMessage.on(({ payload, from }) => handler(payload, from));
   }
 
   onPeerConnectionStatusChanged(handler: (peer: RtcPeer) => void): () => void {
@@ -224,23 +206,17 @@ export class PlayerSession {
         if (this.rtc.isHost()) this.broadcastRoster();
       }),
 
-      // A fresh host either already has a full roster (it was a guest a
-      // moment ago and had been receiving broadcasts) or is the very first
-      // peer in the room — either way, push out what it has so everyone
-      // converges. A guest re-announces itself to make sure the (possibly
-      // brand new) host definitely has its profile, rather than trusting
-      // that the old host's in-memory state survived the handoff.
+      // A fresh host either already has a full roster (it was a guest a moment ago and had been
+      // receiving broadcasts) or is the very first peer in the room. Either way, push out what it
+      // has so everyone converges. A guest re-announces itself so the (possibly brand new) host
+      // definitely has its profile, rather than trusting the old host's memory survived.
       this.rtc.onHostChanged(() => {
-        if (this.rtc.isHost()) {
-          this.broadcastRoster();
-        } else {
-          this.announceProfileToHost();
-        }
+        if (this.rtc.isHost()) this.broadcastRoster();
+        else this.announceProfileToHost();
       }),
 
-      // onHostChanged can fire before the RTC link to that host is actually
-      // up — sending then would silently no-op. Re-announce the moment the
-      // connection to the (possibly new) host becomes active instead.
+      // onHostChanged can fire before the RTC link to that host is actually up, and sending then
+      // would silently no-op. Re-announce the moment the link to the (possibly new) host is active.
       this.rtc.onPeerStatusChanged((peer) => {
         if (
           peer.status === "active" &&
@@ -263,10 +239,7 @@ export class PlayerSession {
   }
 
   private broadcastRoster(): void {
-    const envelope: Envelope = {
-      kind: "roster",
-      players: this.directory.getAll(),
-    };
+    const envelope: Envelope = { kind: "roster", players: this.directory.getAll() };
     this.messenger.broadcast(JSON.stringify(envelope));
   }
 
@@ -275,18 +248,15 @@ export class PlayerSession {
     try {
       envelope = JSON.parse(raw);
     } catch {
-      console.warn("[PlayerSession] Ignoring non-JSON message");
+      this.log.warn("Ignoring non-JSON message");
       return;
     }
 
-    // The host is directly connected to every guest, so `from` here is the
-    // verified identity of whoever actually sent this over the wire — it
-    // cannot be spoofed. Anything a guest claims *inside* the envelope
-    // (profile.peerId, envelope.from) is just data and must not be trusted.
-    // This only applies at the host: a guest's `from` is always the host
-    // itself (messages are relayed, not direct), so a guest has no way to
-    // verify the original author and must keep trusting envelope.from as
-    // stamped by the host.
+    // The host is directly connected to every guest, so `from` here is the verified identity of
+    // whoever actually sent this over the wire. Anything a guest claims *inside* the envelope
+    // (profile.peerId, envelope.from) is just data and must not be trusted. This only applies at
+    // the host: a guest's `from` is always the host itself (messages are relayed), so a guest
+    // must keep trusting envelope.from as stamped by the host.
     if (this.rtc.isHost()) {
       envelope = this.stampVerifiedSender(envelope, from);
     }
@@ -314,9 +284,9 @@ export class PlayerSession {
               this.messenger.sendToPeer(peer.signalingPeerId, relayed); // broadcast relay
             }
           }
-          this.emitApp(envelope.payload, envelope.from);
+          this.appMessage.emit({ payload: envelope.payload, from: envelope.from });
         } else if (envelope.to === this.rtc.getLocalPeerId()) {
-          this.emitApp(envelope.payload, envelope.from);
+          this.appMessage.emit({ payload: envelope.payload, from: envelope.from });
         } else if (this.rtc.isHost()) {
           this.messenger.sendToPeer(envelope.to, relayed); // direct relay
         }
@@ -325,21 +295,14 @@ export class PlayerSession {
     }
   }
 
-  private emitApp(payload: unknown, from: SignalingPeerId): void {
-    for (const handler of this.appMessageHandlers) handler(payload, from);
-  }
-
   private stampVerifiedSender(envelope: Envelope, verifiedFrom: SignalingPeerId): Envelope {
     switch (envelope.kind) {
       case "profile":
-        return {
-          ...envelope,
-          profile: { ...envelope.profile, peerId: verifiedFrom },
-        };
+        return { ...envelope, profile: { ...envelope.profile, peerId: verifiedFrom } };
       case "app":
         return { ...envelope, from: verifiedFrom };
       case "roster":
-        return envelope; // host never consumes a guest's roster claim anyway (early-return above)
+        return envelope; // the host never consumes a guest's roster claim (early return above)
     }
   }
 }

@@ -1,4 +1,3 @@
-// application/messaging/wire.ts
 // Everything that crosses the network is parsed here, once.
 
 import type { CommandResult, PeerId } from "./types";

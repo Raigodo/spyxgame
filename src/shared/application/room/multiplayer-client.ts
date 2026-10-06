@@ -1,18 +1,9 @@
-// application/room/multiplayer-client.ts
 // Composition root + facade. Exposes plain getters and `on…` callbacks only;
 // no inner class (session, presence, bus, lobby) ever leaves this file.
 // Getters are safe to call in any state, and return referentially stable
 // values between changes, so they can back a useSyncExternalStore directly.
 
-import {
-  PlayerSession,
-  forgetHostPeer,
-  loadLocalProfile,
-  recallHostPeer,
-  rememberHostPeer,
-  saveLocalProfile,
-} from "@/shared/infrastructure/player";
-import { WebRtcService } from "@/shared/infrastructure/webrtc";
+import type { PlayerSession, PlayerStores } from "@/shared/infrastructure/player";
 import type { SignalingPeerId } from "@/shared/infrastructure/signaling";
 import { PlayerPresenceService } from "@/shared/application/presence";
 import { ChatSendResult, ChatService, type ChatLine } from "@/shared/application/chat";
@@ -30,7 +21,13 @@ import {
   createSessionTransport,
   type CommandResult,
 } from "@/shared/application/messaging";
-import { Emitter } from "./emitter";
+import {
+  Emitter,
+  type AppConfig,
+  type Clock,
+  type IdGenerator,
+  type Logger,
+} from "@/shared/kernel";
 import { RoomStateService, type RoomStateOptions } from "./room-state-service";
 import type { ActiveGame, GameContext, RoomPhase, RoomState } from "./room-state";
 import {
@@ -65,25 +62,25 @@ export interface ClientOptions {
   games?: readonly RegisteredGame[];
 }
 
-interface GameEvent {
-  name: string;
-  data: unknown;
-}
-
-interface GameParts {
-  runtime: GameRuntime;
-  channel: StateChannel<SlotValue>;
-  events: EventChannel<GameEvent>;
-}
-
-export interface ClientOptions {
-  /** Every game the client can run. Registered before the bus starts. */
-  games?: readonly RegisteredGame[];
+export interface ClientDeps {
+  /** A fresh session stack per join: peerIds must never be reused. */
+  createSession(): PlayerSession;
+  stores: PlayerStores;
+  ids: IdGenerator;
+  clock: Clock;
+  logger: Logger;
+  config: AppConfig;
 }
 
 interface GameEvent {
   name: string;
   data: unknown;
+}
+
+interface GameEventDelivery {
+  name: string;
+  data: unknown;
+  from: string;
 }
 
 interface GameParts {
@@ -128,7 +125,13 @@ const rosterKey = (p: LobbyPlayer) =>
   ]);
 
 function sameRoster(a: LobbyPlayer[], b: LobbyPlayer[]): boolean {
-  return a.length === b.length && a.every((p, i) => rosterKey(p) === rosterKey(b[i]));
+  return (
+    a.length === b.length &&
+    a.every((p, i) => {
+      const other = b[i];
+      return other !== undefined && rosterKey(p) === rosterKey(other);
+    })
+  );
 }
 
 const sameLobbyInfo = (a: LobbyInfo, b: LobbyInfo) =>
@@ -154,29 +157,35 @@ export class MultiplayerClient {
   private teardownPromise?: Promise<void>;
   private lastSavedNickname?: string;
 
-  private readonly statusEm = new Emitter<[ClientStatus]>();
-  private readonly phaseEm = new Emitter<[RoomPhase | undefined]>();
-  private readonly hostEm = new Emitter<[SignalingPeerId | undefined]>();
-  private readonly pendingEm = new Emitter<[boolean]>();
-  private readonly playerIdEm = new Emitter<[JoinResult]>();
-  private readonly supersededEm = new Emitter<[]>();
-  private readonly kickedEm = new Emitter<[]>();
-  private readonly joinedEm = new Emitter<[LobbyPlayer]>();
-  private readonly rejoinedEm = new Emitter<[LobbyPlayer]>();
-  private readonly updatedEm = new Emitter<[LobbyPlayer]>();
-  private readonly leftEm = new Emitter<[LobbyPlayer]>();
-  private readonly playersEm = new Emitter<[LobbyPlayer[]]>();
-  private readonly lobbyEm = new Emitter<[LobbyInfo]>();
-  private readonly gameEm = new Emitter<[ActiveGame | undefined]>();
-  private readonly chatEm = new Emitter<[ChatLine]>();
+  private readonly statusEm = new Emitter<ClientStatus>();
+  private readonly phaseEm = new Emitter<RoomPhase | undefined>();
+  private readonly hostEm = new Emitter<SignalingPeerId | undefined>();
+  private readonly pendingEm = new Emitter<boolean>();
+  private readonly playerIdEm = new Emitter<JoinResult>();
+  private readonly supersededEm = new Emitter();
+  private readonly kickedEm = new Emitter();
+  private readonly joinedEm = new Emitter<LobbyPlayer>();
+  private readonly rejoinedEm = new Emitter<LobbyPlayer>();
+  private readonly updatedEm = new Emitter<LobbyPlayer>();
+  private readonly leftEm = new Emitter<LobbyPlayer>();
+  private readonly playersEm = new Emitter<LobbyPlayer[]>();
+  private readonly lobbyEm = new Emitter<LobbyInfo>();
+  private readonly gameEm = new Emitter<ActiveGame | undefined>();
+  private readonly chatEm = new Emitter<ChatLine>();
 
   private readonly registry = new Map<string, RegisteredGame>();
   private readonly handles = new Map<string, object>();
-  private readonly slotEms = new Map<string, Emitter<[]>>();
-  private readonly eventEms = new Map<string, Emitter<[string, unknown, string]>>();
+  private readonly slotEms = new Map<string, Emitter>();
+  private readonly eventEms = new Map<string, Emitter<GameEventDelivery>>();
   private readonly roomOptions: RoomStateOptions;
+  private get stores(): PlayerStores {
+    return this.deps.stores;
+  }
 
-  constructor(options: ClientOptions = {}) {
+  constructor(
+    options: ClientOptions,
+    private readonly deps: ClientDeps
+  ) {
     for (const game of options.games ?? []) {
       if (this.registry.has(game.id))
         throw new Error(`[MultiplayerClient] Duplicate game "${game.id}".`);
@@ -208,7 +217,7 @@ export class MultiplayerClient {
   /** Idempotent. Safe to call after a failed join, during a join, or twice. */
   async leave(): Promise<void> {
     await this.inFlightJoin; // let a pending join settle, then tear it down properly
-    if (this.roomId) forgetHostPeer(this.roomId); // a deliberate leave never reclaims
+    if (this.roomId) this.stores.hostClaims.forget(this.roomId); // a deliberate leave never reclaims
     await this.teardown();
     this.lifecycle = "idle";
     this.roomId = undefined;
@@ -221,15 +230,16 @@ export class MultiplayerClient {
     this.syncDerived();
 
     const suppliedId = options.playerId?.trim();
-    const playerId = suppliedId || crypto.randomUUID();
+    const playerId = suppliedId || this.deps.ids.next();
     const result: JoinResult = { playerId, generated: !suppliedId };
-    const nickname = options.nickname?.trim() || loadLocalProfile(playerId)?.nickname || "Player";
+    const nickname =
+      options.nickname?.trim() || this.stores.profiles.load(playerId)?.nickname || "Player";
 
     // peerId is deliberately not passed: it must be fresh per join.
-    const session = new PlayerSession(new WebRtcService());
+    const session = this.deps.createSession();
     let parts: Parts | undefined;
     try {
-      const formerHostPeerId = recallHostPeer(options.roomId, playerId);
+      const formerHostPeerId = this.stores.profiles.load(playerId)?.nickname;
       await session.join(options.roomId, buildLocalProfileInput(playerId, nickname), {
         formerHostPeerId,
       });
@@ -257,15 +267,33 @@ export class MultiplayerClient {
   }
 
   private assemble(session: PlayerSession): Parts {
-    const bus = new RoomBus(createSessionTransport(session));
-    const presence = new PlayerPresenceService(session, bus);
+    const { clock, ids, logger, config } = this.deps;
+    const bus = new RoomBus({
+      transport: createSessionTransport(session),
+      clock,
+      ids,
+      logger: logger.child("bus"),
+      config: config.bus,
+    });
+    const presence = new PlayerPresenceService({
+      session,
+      bus,
+      clock,
+      ids,
+      logger: logger.child("presence"),
+      config: config.presence,
+    });
     const roomState = new RoomStateService(bus, this.roomOptions);
     const lobby = new LobbyModule(
       presence,
       () => roomState.getState().round,
       roomState.getState().lobby
     );
-    const chat = new ChatService(bus, {
+    const chat = new ChatService({
+      bus,
+      clock,
+      ids,
+      config: config.chat,
       getLocalPeerId: () => session.getLocalPlayer()?.peerId,
       resolveSender: (peerId) => {
         const p = presence.getPlayers().find((x) => x.peerId === peerId);
@@ -301,6 +329,7 @@ export class MultiplayerClient {
       isHostReady: () => session.isHost() && bus.getStatus() === "ready",
       getRoomState: () => roomState.getState(),
       getRosterPlayerIds: () => this.players.map((p) => p.playerId),
+      logger: logger.child("games"),
     });
 
     return { session, presence, bus, roomState, lobby, chat, games, hostRuntime, cleanups: [] };
@@ -309,7 +338,7 @@ export class MultiplayerClient {
   private wire(parts: Parts, playerId: string, initialNickname: string): void {
     const { session, presence, bus, roomState, lobby, chat } = parts;
     this.lastSavedNickname = initialNickname;
-    saveLocalProfile(playerId, { ...loadLocalProfile(playerId), nickname: initialNickname });
+    this.stores.profiles.saveNickname(playerId, initialNickname);
 
     parts.cleanups.push(
       bus.onStatusChanged(() => {
@@ -322,7 +351,7 @@ export class MultiplayerClient {
         // Remember the seat so a page refresh can take it back (WebRtcService.startReclaim).
         const localPeerId = session.getLocalPlayer()?.peerId;
         if (session.isHost() && localPeerId && this.roomId) {
-          rememberHostPeer(this.roomId, playerId, localPeerId);
+          this.stores.hostClaims.remember(this.roomId, playerId, localPeerId);
         }
         this.hostEm.emit(hostPeerId);
         this.syncDerived();
@@ -345,7 +374,7 @@ export class MultiplayerClient {
         const local = session.getLocalPlayer();
         if (!local || p.peerId !== local.peerId || p.nickname === this.lastSavedNickname) return;
         this.lastSavedNickname = p.nickname;
-        saveLocalProfile(playerId, { ...loadLocalProfile(playerId), nickname: p.nickname });
+        this.stores.profiles.saveNickname(playerId, p.nickname);
       })
     );
 
@@ -356,14 +385,14 @@ export class MultiplayerClient {
           parts.hostRuntime.reconcile();
         }),
         game.events.onEvent((event, from) =>
-          this.eventEmitter(id).emit(event.name, event.data, from)
+          this.eventEmitter(id).emit({ name: event.name, data: event.data, from })
         )
       );
     }
   }
 
   private handleSuperseded(): void {
-    if (this.roomId) forgetHostPeer(this.roomId);
+    if (this.roomId) this.stores.hostClaims.forget(this.roomId);
     this.lifecycle = "superseded";
     this.supersededEm.emit();
     this.syncDerived();
@@ -371,7 +400,7 @@ export class MultiplayerClient {
   }
 
   private handleKicked(): void {
-    if (this.roomId) forgetHostPeer(this.roomId);
+    if (this.roomId) this.stores.hostClaims.forget(this.roomId);
     this.lifecycle = "kicked";
     this.kickedEm.emit();
     this.syncDerived();
@@ -674,7 +703,7 @@ export class MultiplayerClient {
     this.parts?.hostRuntime.reconcile();
   }
 
-  private relay(emitter: Emitter<[LobbyPlayer]>, player: LobbyPlayer): void {
+  private relay(emitter: Emitter<LobbyPlayer>, player: LobbyPlayer): void {
     this.refreshPlayers(); // cache first, so handlers read fresh getters
     emitter.emit(player);
   }
@@ -741,15 +770,15 @@ export class MultiplayerClient {
     }
   }
 
-  private slotEmitter(id: string): Emitter<[]> {
+  private slotEmitter(id: string): Emitter {
     let emitter = this.slotEms.get(id);
-    if (!emitter) this.slotEms.set(id, (emitter = new Emitter<[]>()));
+    if (!emitter) this.slotEms.set(id, (emitter = new Emitter()));
     return emitter;
   }
 
-  private eventEmitter(id: string): Emitter<[string, unknown, string]> {
+  private eventEmitter(id: string): Emitter<GameEventDelivery> {
     let emitter = this.eventEms.get(id);
-    if (!emitter) this.eventEms.set(id, (emitter = new Emitter<[string, unknown, string]>()));
+    if (!emitter) this.eventEms.set(id, (emitter = new Emitter<GameEventDelivery>()));
     return emitter;
   }
 
@@ -777,6 +806,7 @@ export class MultiplayerClient {
     },
     start: (id, config) => this.startGameById(id, config),
     onSlotChanged: (id, handler) => this.slotEmitter(id).on(handler),
-    onEvent: (id, handler) => this.eventEmitter(id).on(handler),
+    onEvent: (id, handler) =>
+      this.eventEmitter(id).on(({ name, data, from }) => handler(name, data, from)),
   };
 }

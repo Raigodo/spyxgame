@@ -30,9 +30,8 @@ export class TeamLobbyService {
     for (const teamId of this.teamIds) result[teamId] = [];
 
     for (const player of this.getPlayers()) {
-      if (player.teamId && result[player.teamId]) {
-        result[player.teamId].push(player);
-      }
+      const bucket = player.teamId ? result[player.teamId] : undefined;
+      bucket?.push(player);
     }
     return result;
   }

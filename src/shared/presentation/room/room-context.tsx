@@ -1,4 +1,3 @@
-// src/shared/presentation/room/room-context.tsx
 "use client";
 
 import { createContext, useContext } from "react";
