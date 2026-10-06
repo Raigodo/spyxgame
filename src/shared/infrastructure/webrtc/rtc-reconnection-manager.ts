@@ -2,6 +2,7 @@ import { shortId, type Cancel, type Clock, type Logger, type WebRtcConfig } from
 import type { HostElectionService, SignalingPeerId } from "../signaling";
 import type { RtcPeerLinkFactory } from "./rtc-peer-link-factory";
 import type { RtcPeerRegistry } from "./rtc-peer-registry";
+import { decideDeadLinkAction } from "./link-policy";
 
 export interface RtcReconnectionManagerDeps {
   registry: RtcPeerRegistry;
@@ -60,9 +61,13 @@ export class RtcReconnectionManager {
     const entry = registry.get(signalingPeerId);
     if (!entry) return;
 
-    // A guest has one link that matters: the one to the host. A dead link to anyone else is a
-    // stale leftover (e.g. the previous host after a handoff) and must never be read as a dead host.
-    if (!isHost() && signalingPeerId !== getHostPeerId()) {
+    const action = decideDeadLinkAction({
+      isHost: isHost(),
+      peerId: signalingPeerId,
+      hostPeerId: getHostPeerId(),
+    });
+
+    if (action === "drop-stale") {
       this.log.debug(`Dropping stale link to peer=${peer}`);
       registry.discard(signalingPeerId);
       return;
@@ -71,7 +76,7 @@ export class RtcReconnectionManager {
     this.log.warn(`Connection died for peer=${peer}`);
     registry.disposeEntry(entry);
 
-    if (isHost()) await this.reconnectAsHost(signalingPeerId);
+    if (action === "reconnect-as-host") await this.reconnectAsHost(signalingPeerId);
     else this.reconnectAsGuest(signalingPeerId);
   }
 

@@ -11,6 +11,13 @@ import type {
 } from "./types";
 import { parseWire, type ChannelCopy, type Wire } from "./wire";
 import { Emitter, type Cancel, type Clock, type IdGenerator, type Logger } from "@/shared/kernel";
+import {
+  compareVersions,
+  computeBusStatus,
+  isDuplicateCommand,
+  isRecoveryComplete,
+  shouldReplaceBest,
+} from "./bus-rules";
 
 type ErasedHandler<S> = (args: {
   from: PeerId;
@@ -19,9 +26,6 @@ type ErasedHandler<S> = (args: {
   payload: unknown;
   playerId?: string;
 }) => { ok: true; state: S } | { ok: false; reason: string };
-
-const cmp = (a: { epoch: number; rev: number }, b: { epoch: number; rev: number }) =>
-  a.epoch - b.epoch || a.rev - b.rev;
 
 /** What channels need from the bus (not part of the public API). */
 interface ChannelHost {
@@ -129,7 +133,7 @@ export class StateChannel<S> implements BusStateChannel {
   acceptState(c: ChannelCopy): void {
     const value = this.opts.validate(c.value);
     if (value === undefined) return;
-    const order = cmp(c, this.version());
+    const order = compareVersions(c, this.version());
     if (order < 0) return; // stale or from a demoted host
     this.synced = true;
     if (order === 0) return; // identical version: just confirms we are in sync
@@ -138,7 +142,7 @@ export class StateChannel<S> implements BusStateChannel {
 
   /** @internal Host: adopt the best offered copy during recovery. */
   adoptIfNewer(c: ChannelCopy): void {
-    if (cmp(c, this.version()) <= 0) return;
+    if (compareVersions(c, this.version()) <= 0) return;
     const value = this.opts.validate(c.value);
     if (value !== undefined) this.adopt(c, value);
   }
@@ -158,7 +162,7 @@ export class StateChannel<S> implements BusStateChannel {
 
   /** @internal Host: apply a command exactly once per (sender, seq). */
   execute(from: PeerId, seq: number, type: string, payload: unknown): CommandResult {
-    if (seq <= (this.applied[from] ?? 0)) return { ok: true }; // duplicate re-send
+    if (isDuplicateCommand(this.applied, from, seq)) return { ok: true }; // duplicate re-send
 
     const handler = this.handlers.get(type);
     const out: ReturnType<ErasedHandler<S>> = handler
@@ -562,7 +566,7 @@ export class RoomBus {
     recovery.offeredBy.add(from);
     for (const copy of channels) {
       const prior = recovery.best.get(copy.ch);
-      if (!prior || cmp(copy, prior) > 0) recovery.best.set(copy.ch, copy);
+      if (shouldReplaceBest(copy, prior)) recovery.best.set(copy.ch, copy);
     }
     this.noteRecoveryActivity();
   }
@@ -580,8 +584,9 @@ export class RoomBus {
   private checkRecoveryComplete(): void {
     const recovery = this.recovery;
     if (!recovery) return;
-    const expected = this.transport.getExpectedPeerIds();
-    if (expected.every((id) => recovery.offeredBy.has(id))) this.finishRecovery();
+    if (isRecoveryComplete(this.transport.getExpectedPeerIds(), recovery.offeredBy)) {
+      this.finishRecovery();
+    }
   }
 
   private finishRecovery(): void {
@@ -611,12 +616,14 @@ export class RoomBus {
   // ─── Status ───────────────────────────────────────────────────────────────
 
   private computeStatus(): BusStatus {
-    if (!this.started) return "syncing";
-    if (this.transport.isHost()) return this.recovery ? "syncing" : "ready";
     const hostId = this.transport.getHostPeerId();
-    if (!hostId || !this.transport.isLinkActive(hostId)) return "syncing";
-    for (const channel of this.stateChannels.values()) if (!channel.isSynced()) return "syncing";
-    return "ready";
+    return computeBusStatus({
+      started: this.started,
+      isHost: this.transport.isHost(),
+      recovering: this.recovery !== undefined,
+      hostLinkActive: hostId !== undefined && this.transport.isLinkActive(hostId),
+      allChannelsSynced: Array.from(this.stateChannels.values()).every((c) => c.isSynced()),
+    });
   }
 
   private refreshStatus(): void {

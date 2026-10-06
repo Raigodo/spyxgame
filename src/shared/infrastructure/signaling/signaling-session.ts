@@ -13,6 +13,7 @@ import type { HostElectionPort } from "./ports/host-election-port";
 import type { RoomMembershipPort } from "./ports/room-membership-port";
 import type { SignalInboxPort } from "./ports/signal-inbox-port";
 import { SignalingMailbox } from "./signaling-mailbox";
+import { diffPeers } from "./peer-diff";
 
 type SignalReceivedHandler = (message: SignalingMessage<WebRtcSignal>) => void;
 
@@ -250,26 +251,17 @@ export class SignalingSession {
     this.unsubscribeFromPeers = undefined;
   }
 
-  // The single chokepoint for all peer state changes. Order is guaranteed: state is always
-  // updated before events fire.
   private reconcilePeers(peers: SignalingPeer[]): void {
-    const incomingIds = new Set(peers.map((p) => p.peerId));
+    const known = this.tracker.getAll().map((p) => p.peerId);
+    const diff = diffPeers(known, peers, this.localPeerId);
 
-    for (const peer of peers) {
-      if (peer.peerId === this.localPeerId) continue;
-
-      if (this.tracker.has(peer.peerId)) {
-        this.tracker.update(peer);
-      } else {
-        this.tracker.add(peer);
-      }
+    for (const { peer, isNew } of diff.upserts) {
+      if (isNew) this.tracker.add(peer);
+      else this.tracker.update(peer);
     }
-
-    for (const existing of this.tracker.getAll()) {
-      if (!incomingIds.has(existing.peerId)) {
-        this.ackTracker?.forget(existing.peerId);
-        this.tracker.remove(existing.peerId);
-      }
+    for (const peerId of diff.removed) {
+      this.ackTracker?.forget(peerId);
+      this.tracker.remove(peerId);
     }
   }
 

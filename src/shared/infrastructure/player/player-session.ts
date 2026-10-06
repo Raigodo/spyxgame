@@ -5,18 +5,7 @@ import type { HostTransferResult, RtcPeer, RtcPeerStatus } from "../webrtc/types
 import type { WebRtcService } from "../webrtc/web-rtc-service";
 import { PlayerDirectory } from "./player-directory";
 import type { LocalProfileInput, PlayerProfile } from "./types";
-
-type Envelope =
-  | { kind: "profile"; profile: PlayerProfile }
-  | { kind: "roster"; players: PlayerProfile[] }
-  | { kind: "app"; scope: "broadcast"; from: SignalingPeerId; payload: unknown }
-  | {
-      kind: "app";
-      scope: "direct";
-      from: SignalingPeerId;
-      to: SignalingPeerId;
-      payload: unknown;
-    };
+import { parseEnvelope, type Envelope } from "./envelope-parser";
 
 export interface PlayerSessionDeps {
   rtc: WebRtcService;
@@ -244,11 +233,9 @@ export class PlayerSession {
   }
 
   private handleIncoming(raw: string, from: SignalingPeerId): void {
-    let envelope: Envelope;
-    try {
-      envelope = JSON.parse(raw);
-    } catch {
-      this.log.warn("Ignoring non-JSON message");
+    let envelope = parseEnvelope(raw);
+    if (!envelope) {
+      this.log.warn("Ignoring malformed message");
       return;
     }
 

@@ -17,6 +17,7 @@ export interface AppConfig {
     reconnectTimeoutMs: number;
     reclaimWindowMs: number;
     maxChunkSize: number;
+    maxChunksPerMessage: number;
     chunkBufferTtlMs: number;
   };
   bus: {
@@ -59,6 +60,7 @@ export const DEFAULT_CONFIG: AppConfig = {
     reconnectTimeoutMs: 5_000,
     reclaimWindowMs: 10_000,
     maxChunkSize: 12_000,
+    maxChunksPerMessage: 256,
     chunkBufferTtlMs: 30_000,
   },
   bus: {

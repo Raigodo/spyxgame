@@ -1,6 +1,7 @@
 import { Emitter } from "@/shared/kernel";
 import type { SignalingPeerId } from "../signaling";
 import type { PlayerProfile } from "./types";
+import { findDepartedPlayers } from "./roster-diff";
 
 export class PlayerDirectory {
   private readonly players = new Map<SignalingPeerId, PlayerProfile>();
@@ -14,15 +15,12 @@ export class PlayerDirectory {
     (existed ? this.updated : this.joined).emit(profile);
   }
 
-  // Replaces the whole directory (a guest applying the host's roster snapshot), diffed against
-  // the previous contents so joined/updated/left still fire correctly. Stale ids are collected
-  // up front, so nothing is deleted while iterating.
+  // Replaces the whole directory (a guest applying the host's roster snapshot), so joined,
+  // updated and left still fire correctly for consumers.
   replaceAll(profiles: PlayerProfile[]): void {
-    const incomingIds = new Set(profiles.map((p) => p.peerId));
-    const staleIds = Array.from(this.players.keys()).filter((id) => !incomingIds.has(id));
-
+    const departed = findDepartedPlayers(this.players.keys(), profiles);
     for (const profile of profiles) this.upsert(profile);
-    for (const id of staleIds) this.remove(id);
+    for (const id of departed) this.remove(id);
   }
 
   remove(peerId: SignalingPeerId): void {

@@ -12,6 +12,13 @@ import type { PlayerProfile, PlayerSession } from "@/shared/infrastructure/playe
 import type { SignalingPeerId } from "@/shared/infrastructure/signaling";
 import type { RtcPeerStatus } from "@/shared/infrastructure/webrtc";
 import type { PlayerPresence } from "./types";
+import {
+  findDuplicateGroups,
+  findExistingDuplicate,
+  findSurvivor,
+  planArbitration,
+  readPlayerId,
+} from "./duplicate-rules";
 
 type PersistedMetadata = Record<string, unknown>;
 
@@ -479,29 +486,13 @@ export class PlayerReconnectionCoordinator {
 
   // ─── Host-only arbitration ────────────────────────────────────────────────
 
-  // Arbitrates every playerId that is already present more than once. Waits for the data-channel
-  // links first: a ping sent before the link is active is silently dropped, which would make a
-  // live tab look like a ghost.
   private arbitrateExistingDuplicates(): void {
     const localPeerId = this.session.getLocalPlayer()?.peerId;
 
-    const groups = new Map<string, PlayerProfile[]>();
-    for (const profile of this.session.getPlayers()) {
-      const playerId = readPlayerId(profile.metadata);
-      if (playerId) groups.set(playerId, [...(groups.get(playerId) ?? []), profile]);
-    }
-
-    for (const group of groups.values()) {
-      if (group.length < 2) continue;
-      // Directory order is join order for peers we heard about; treat the last remote entry as
-      // the newcomer. One pair per group per call.
-      const newcomer = [...group].reverse().find((p) => p.peerId !== localPeerId);
-      if (!newcomer) continue;
-      const involved = group.map((p) => p.peerId).filter((id) => id !== localPeerId);
-
-      this.afterLinksActive(involved, () => {
+    for (const group of findDuplicateGroups(this.session.getPlayers(), localPeerId)) {
+      this.afterLinksActive(group.involvedPeerIds, () => {
         if (!this.session.isHost()) return;
-        const current = this.session.getPlayers().find((p) => p.peerId === newcomer.peerId);
+        const current = this.session.getPlayers().find((p) => p.peerId === group.newcomerPeerId);
         if (current) this.arbitrateIfDuplicate(current);
       });
     }
@@ -547,15 +538,12 @@ export class PlayerReconnectionCoordinator {
     if (!playerId) return;
     if (this.pendingArbitrations.has(playerId)) return; // one arbitration at a time per playerId
 
-    const existing = this.session
-      .getPlayers()
-      .find((p) => p.peerId !== newProfile.peerId && readPlayerId(p.metadata) === playerId);
+    const existing = findExistingDuplicate(this.session.getPlayers(), newProfile, playerId);
     if (!existing) return;
 
     this.broadcastDuplicateDetected(playerId, existing.peerId, newProfile.peerId);
 
-    // The host's own tab is trivially known to be alive: no ping needed.
-    if (existing.peerId === localPeerId) {
+    if (planArbitration(existing.peerId, localPeerId) === "reject-newcomer") {
       this.reject(newProfile.peerId);
       return;
     }
@@ -640,15 +628,7 @@ export class PlayerReconnectionCoordinator {
   // The newcomer's peerId if `departedPeerId` was the old side of a disputed pair and the
   // newcomer is still in the room.
   private findSurvivorReplacing(departedPeerId: SignalingPeerId): SignalingPeerId | undefined {
-    for (const duplicate of this.activeDuplicates.values()) {
-      if (duplicate.oldPeerId !== departedPeerId) continue;
-      const stillThere = this.session.getPlayers().some((p) => p.peerId === duplicate.newPeerId);
-      return stillThere ? duplicate.newPeerId : undefined;
-    }
-    return undefined;
+    const present = new Set(this.session.getPlayers().map((p) => p.peerId));
+    return findSurvivor(this.activeDuplicates.values(), departedPeerId, present);
   }
-}
-
-function readPlayerId(metadata: Record<string, unknown>): string | undefined {
-  return typeof metadata.playerId === "string" ? metadata.playerId : undefined;
 }

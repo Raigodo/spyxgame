@@ -3,6 +3,7 @@ import type { HostElectionPort, HostDocument } from "./ports/host-election-port"
 import type { RoomMembershipPort } from "./ports/room-membership-port";
 import type { SignalInboxPort } from "./ports/signal-inbox-port";
 import type { RoomId, SignalingPeerId } from "./types";
+import { candidateDelayMs, orderCandidates, pickNextHost } from "./election-order";
 
 type HostChangedHandler = (host: HostDocument | null) => void;
 
@@ -113,11 +114,11 @@ export class HostElectionService {
     this.log.debug("Electing next host");
 
     const livePeers = await membership.listPeers(roomId);
-    const candidateIds = Array.from(new Set([localPeerId, ...livePeers.map((p) => p.peerId)]))
-      .filter((id) => id !== excludePeerId)
-      .sort();
-
-    const nextPeerId = candidateIds[0];
+    const nextPeerId = pickNextHost(
+      livePeers.map((p) => p.peerId),
+      localPeerId,
+      excludePeerId
+    );
     if (nextPeerId === undefined) {
       this.log.warn("No peers available for election");
       return null;
@@ -205,7 +206,7 @@ export class HostElectionService {
       return;
     }
 
-    const delay = myPosition * this.deps.config.positionIntervalMs;
+    const delay = candidateDelayMs(myPosition, this.deps.config.positionIntervalMs);
     this.log.debug(`Countdown started: position=${myPosition} delay=${delay}ms`);
     this.positionCountdown.start(delay);
   }
@@ -226,9 +227,11 @@ export class HostElectionService {
       membership.listPeers(roomId),
     ]);
 
-    const liveIds = new Set(livePeers.map((p) => p.peerId));
-    liveIds.add(localPeerId);
-
-    return candidateIds.filter((id) => id !== deadHostPeerId && liveIds.has(id)).sort();
+    return orderCandidates({
+      registered: candidateIds,
+      livePeerIds: livePeers.map((p) => p.peerId),
+      localPeerId,
+      deadHostPeerId,
+    });
   }
 }
