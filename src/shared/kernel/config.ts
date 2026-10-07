@@ -31,6 +31,8 @@ export interface AppConfig {
     duplicateRevealTimeoutMs: number;
     helloIntervalMs: number;
     linkWaitMs: number;
+    /** How long a departed player stays visible as "reconnecting". */
+    departureGraceMs: number;
   };
   chat: {
     burst: number;
@@ -40,6 +42,8 @@ export interface AppConfig {
   };
   profile: {
     cookieMaxAgeSeconds: number;
+    /** A host-claim stamped by pagehide counts as "old page is gone" for this long. */
+    hostClaimMaxAgeMs: number;
   };
 }
 
@@ -71,18 +75,20 @@ export const DEFAULT_CONFIG: AppConfig = {
   },
   presence: {
     pingTimeoutMs: 2_000,
-    duplicateRevealTimeoutMs: 4_000, // was PING_TIMEOUT_MS * 2
+    duplicateRevealTimeoutMs: 4_000,
     helloIntervalMs: 3_000,
     linkWaitMs: 8_000,
+    departureGraceMs: 10_000,
   },
   chat: {
-    burst: 10,
+    burst: 30,
     refillPerSecond: 1,
     maxTextLength: 500,
     maxHistory: 200,
   },
   profile: {
     cookieMaxAgeSeconds: 60 * 60 * 24,
+    hostClaimMaxAgeMs: 15_000,
   },
 };
 
@@ -104,5 +110,4 @@ export type WebRtcConfig = AppConfig["webrtc"];
 export type BusConfig = AppConfig["bus"];
 export type PresenceConfig = AppConfig["presence"];
 export type ChatConfig = AppConfig["chat"];
-
 export type ProfileConfig = AppConfig["profile"];

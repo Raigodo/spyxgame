@@ -1,11 +1,11 @@
 import { Emitter, type Logger } from "@/shared/kernel";
 import type { RoomId, SignalingPeerId } from "../signaling";
-import type { ChunkedMessenger } from "../webrtc";
+import type { ChunkedMessenger, FormerHost } from "../webrtc";
 import type { HostTransferResult, RtcPeer, RtcPeerStatus } from "../webrtc/types";
 import type { WebRtcService } from "../webrtc/web-rtc-service";
+import { parseEnvelope, type Envelope } from "./envelope-parser";
 import { PlayerDirectory } from "./player-directory";
 import type { LocalProfileInput, PlayerProfile } from "./types";
-import { parseEnvelope, type Envelope } from "./envelope-parser";
 
 export interface PlayerSessionDeps {
   rtc: WebRtcService;
@@ -37,12 +37,12 @@ export class PlayerSession {
   async join(
     roomId: RoomId,
     profile: LocalProfileInput,
-    options: { peerId?: SignalingPeerId; formerHostPeerId?: SignalingPeerId } = {}
+    options: { peerId?: SignalingPeerId; formerHost?: FormerHost } = {}
   ): Promise<void> {
     this.messenger.start();
     this.wireListeners(); // subscribe before joinRoom: avoids missing early events
 
-    await this.rtc.joinRoom(roomId, options.peerId, { formerHostPeerId: options.formerHostPeerId });
+    await this.rtc.joinRoom(roomId, options.peerId, { formerHost: options.formerHost });
 
     this.localProfile = {
       peerId: this.rtc.getLocalPeerId()!,
@@ -66,8 +66,8 @@ export class PlayerSession {
   }
 
   // Forcibly removes another player. Host-only. Purely mechanical: sends no notice to the
-  // removed player. Callers that want them to clean up gracefully (the presence layer's
-  // arbitration and kick) should message them first.
+  // removed player. Callers that want them to clean up gracefully (arbitration, kick) message
+  // them first.
   async hostRemovePeer(peerId: SignalingPeerId): Promise<void> {
     if (!this.isHost()) {
       throw new Error("[PlayerSession] Only the host can remove another player.");
@@ -195,17 +195,21 @@ export class PlayerSession {
         if (this.rtc.isHost()) this.broadcastRoster();
       }),
 
-      // A fresh host either already has a full roster (it was a guest a moment ago and had been
-      // receiving broadcasts) or is the very first peer in the room. Either way, push out what it
-      // has so everyone converges. A guest re-announces itself so the (possibly brand new) host
-      // definitely has its profile, rather than trusting the old host's memory survived.
+      // A fresh host either already has a full roster (it was a guest a moment ago) or is the
+      // very first peer in the room. Either way, drop entries for peers that already left, then
+      // push out what it has so everyone converges. A guest re-announces itself so the (possibly
+      // brand new) host definitely has its profile.
       this.rtc.onHostChanged(() => {
-        if (this.rtc.isHost()) this.broadcastRoster();
-        else this.announceProfileToHost();
+        if (this.rtc.isHost()) {
+          this.pruneDepartedPlayers();
+          this.broadcastRoster();
+        } else {
+          this.announceProfileToHost();
+        }
       }),
 
-      // onHostChanged can fire before the RTC link to that host is actually up, and sending then
-      // would silently no-op. Re-announce the moment the link to the (possibly new) host is active.
+      // onHostChanged can fire before the link to that host is actually up, and sending then
+      // would silently no-op. Re-announce the moment the link to the host is active.
       this.rtc.onPeerStatusChanged((peer) => {
         if (
           peer.status === "active" &&
@@ -216,6 +220,18 @@ export class PlayerSession {
         }
       })
     );
+  }
+
+  // A newly promoted host inherits a roster that may list peers who already left. Membership is
+  // the source of truth (its subscription is already open, so this costs no reads).
+  private pruneDepartedPlayers(): void {
+    const members = new Set(this.rtc.getMemberPeerIds());
+    const localPeerId = this.rtc.getLocalPeerId();
+    for (const player of this.directory.getAll()) {
+      if (player.peerId !== localPeerId && !members.has(player.peerId)) {
+        this.directory.remove(player.peerId);
+      }
+    }
   }
 
   private announceProfileToHost(): void {
@@ -243,7 +259,7 @@ export class PlayerSession {
     // whoever actually sent this over the wire. Anything a guest claims *inside* the envelope
     // (profile.peerId, envelope.from) is just data and must not be trusted. This only applies at
     // the host: a guest's `from` is always the host itself (messages are relayed), so a guest
-    // must keep trusting envelope.from as stamped by the host.
+    // keeps trusting envelope.from as stamped by the host.
     if (this.rtc.isHost()) {
       envelope = this.stampVerifiedSender(envelope, from);
     }

@@ -8,7 +8,7 @@ export { WebRtcService } from "./web-rtc-service";
 export type { WebRtcServiceDeps } from "./web-rtc-service";
 export { ChunkedMessenger } from "./chunked-messenger";
 export type { ChunkedMessengerDeps, RawMessaging } from "./chunked-messenger";
-export type { RtcPeer, RtcPeerStatus, HostTransferResult } from "./types";
+export type { FormerHost, HostTransferResult, RtcPeer, RtcPeerStatus } from "./types";
 export type { RtcConnectionProvider } from "./ports/rtc-connection-provider";
 export type { RtcDataChannelPort } from "./ports/rtc-data-channel-port";
 export type {

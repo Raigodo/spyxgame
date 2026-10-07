@@ -12,8 +12,10 @@ import {
   type RtcConnectionProvider,
 } from "@/shared/infrastructure/webrtc";
 import {
+  BrowserPageLifecycle,
   ConsoleLogger,
   DEFAULT_CONFIG,
+  PageLifecycle,
   SystemClock,
   UlidIdGenerator,
   type AppConfig,
@@ -38,6 +40,7 @@ export interface MultiplayerClientOverrides {
   tabStore?: KeyValueStore;
   /** Longer-lived storage (local profile). */
   profileStore?: KeyValueStore;
+  pageLifecycle?: PageLifecycle;
 }
 
 export function createMultiplayerClient(
@@ -83,7 +86,17 @@ export function createMultiplayerClient(
     tabStore: overrides.tabStore,
     profileStore: overrides.profileStore,
     profileConfig: config.profile,
+    clock,
   });
 
-  return new MultiplayerClient(options, { createSession, stores, ids, clock, logger, config });
+  const pageLifecycle = overrides.pageLifecycle ?? new BrowserPageLifecycle();
+  return new MultiplayerClient(options, {
+    createSession,
+    stores,
+    ids,
+    clock,
+    logger,
+    config,
+    pageLifecycle,
+  });
 }

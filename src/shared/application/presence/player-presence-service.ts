@@ -8,6 +8,8 @@ import {
 import type { RoomBus } from "@/shared/application/messaging";
 import type { PlayerProfile, PlayerSession } from "@/shared/infrastructure/player";
 import type { SignalingPeerId } from "@/shared/infrastructure/signaling";
+import { DepartureGhosts } from "./departure-ghosts";
+import { readPlayerId } from "./duplicate-rules";
 import { PlayerReconnectionCoordinator } from "./player-reconnection-coordinator";
 import type { RosterPlayer } from "./types";
 
@@ -21,14 +23,14 @@ export interface PlayerPresenceServiceDeps {
 }
 
 // The single shared read-model for "who's in the room right now, with what connection status."
-// Constructed once, right after PlayerSession.join(), and handed to whatever needs it (the
-// lobby, then the game, ...) for as long as the player stays in the room. None of those
-// consumers implement their own reconnect / duplicate-session / status-broadcast logic; it all
-// lives in PlayerReconnectionCoordinator, wrapped here, disposed once when the room is left.
+// Constructed once, right after PlayerSession.join(), and handed to whatever needs it for as
+// long as the player stays in the room. Reconnect, duplicate-session and status-broadcast logic
+// lives in PlayerReconnectionCoordinator; departed players linger as ghosts (DepartureGhosts).
 export class PlayerPresenceService {
   private readonly session: PlayerSession;
   private readonly log: Logger;
   private readonly reconnection: PlayerReconnectionCoordinator;
+  private readonly ghosts: DepartureGhosts;
   private readonly joined = new Emitter<RosterPlayer>();
   private readonly rejoined = new Emitter<RosterPlayer>();
   private readonly updated = new Emitter<RosterPlayer>();
@@ -39,6 +41,11 @@ export class PlayerPresenceService {
     const { session, bus, clock, ids, logger, config } = deps;
     this.session = session;
     this.log = logger;
+    this.ghosts = new DepartureGhosts({
+      clock,
+      graceMs: config.departureGraceMs,
+      onExpired: (player) => this.left.emit(player),
+    });
     this.reconnection = new PlayerReconnectionCoordinator({
       session,
       bus,
@@ -49,47 +56,49 @@ export class PlayerPresenceService {
     });
 
     this.cleanupFns.push(
-      // A genuinely new player and a returning one both arrive through PlayerSession's single
-      // onPlayerJoined event; the reconnection coordinator has already decided which by the time
-      // this fires (it subscribed first, inside its own constructor). A newcomer currently being
-      // arbitrated as a duplicate is suppressed entirely: its join event fires later, via
-      // onPeerRevealed, if it turns out to be the side that survives. The local player is exempt:
-      // a peer waiting on its own arbitration outcome must still see its own join fire normally.
+      // A new player and a returning one both arrive through PlayerSession's onPlayerJoined; the
+      // coordinator has already decided which by the time this fires (it subscribed first). A
+      // newcomer under duplicate arbitration is suppressed: its join fires later, via
+      // onPeerRevealed, if it survives.
       session.onPlayerJoined((p) => {
-        const localPeerId = session.getLocalPlayer()?.peerId;
-        if (p.peerId !== localPeerId && this.reconnection.isHiddenDuringArbitration(p.peerId)) {
-          return;
-        }
+        if (!this.isVisible(p)) return;
+        this.noteArrival(p);
         const { returning } = this.reconnection.getPresence(p.peerId);
         this.emit(returning ? this.rejoined : this.joined, p);
       }),
       session.onPlayerUpdated((p) => this.emit(this.updated, p)),
-      session.onPlayerLeft((p) => this.emit(this.left, p)),
+      session.onPlayerLeft((p) => this.handleDeparture(p)),
 
       this.reconnection.onPeerRevealed((peerId) => {
         const profile = this.session.getPlayers().find((p) => p.peerId === peerId);
         if (!profile) return;
+        this.noteArrival(profile);
         const { returning } = this.reconnection.getPresence(peerId);
         this.emit(returning ? this.rejoined : this.joined, profile);
       }),
 
-      // Connection status / returning flips don't flow through PlayerSession's own profile
-      // events, so re-project everyone as "updated" whenever presence data changes (this also
-      // covers a reconnecting -> normal status flip once arbitration resolves).
+      this.reconnection.onFarewell((playerId) => {
+        const ghost = this.ghosts.drop(playerId);
+        if (ghost) this.left.emit(ghost);
+        else this.ghosts.announceRemoval(playerId);
+      }),
+
+      // Connection status and returning flips don't flow through PlayerSession's profile events,
+      // so re-project everyone as "updated" whenever presence data changes.
       this.reconnection.onChanged(() => {
         for (const profile of this.session.getPlayers()) {
-          if (this.reconnection.isHiddenDuringArbitration(profile.peerId)) continue;
+          if (!this.isVisible(profile)) continue;
           this.emit(this.updated, profile);
         }
       })
     );
   }
 
-  // Bound to room membership, not to any app phase: call this when the player actually leaves
-  // the room, not when the lobby (or the game) is merely done with it.
+  // Bound to room membership, not to any app phase: call it when the player actually leaves.
   dispose(): void {
     for (const cleanup of this.cleanupFns) cleanup();
     this.cleanupFns.length = 0;
+    this.ghosts.dispose();
     this.reconnection.dispose();
   }
 
@@ -99,13 +108,11 @@ export class PlayerPresenceService {
   }
 
   getPlayers(): RosterPlayer[] {
-    const localPeerId = this.session.getLocalPlayer()?.peerId;
-    return this.session
+    const live = this.session
       .getPlayers()
-      .filter(
-        (p) => p.peerId === localPeerId || !this.reconnection.isHiddenDuringArbitration(p.peerId)
-      )
+      .filter((p) => this.isVisible(p))
       .map((p) => this.toRosterPlayer(p));
+    return [...live, ...this.ghosts.list()];
   }
 
   setNickname(nickname: string): void {
@@ -145,20 +152,76 @@ export class PlayerPresenceService {
     return this.reconnection.onChanged(handler);
   }
 
-  // Fires on whichever side the host's duplicate-session arbitration rejects. Relevant for the
-  // whole room lifetime, so subscribe once, independent of lobby/game phase.
+  // Fires on whichever side the host's duplicate-session arbitration rejects.
   onSessionSuperseded(handler: () => void): () => void {
     return this.reconnection.onSessionSuperseded(handler);
   }
 
   /** Host only. Removes a player from the room; they are told why. Returns false if it could not be done. */
   kickPlayer(peerId: SignalingPeerId): boolean {
+    const ghostPlayerId = this.ghosts.findPlayerIdByPeer(peerId);
+    if (ghostPlayerId !== undefined) {
+      const ghost = this.ghosts.drop(ghostPlayerId); // nothing to disconnect: just drop the row
+      if (ghost) this.left.emit(ghost);
+      return true;
+    }
     return this.reconnection.kick(peerId);
   }
 
   /** Fires on the player the host removed. */
   onKicked(handler: () => void): () => void {
     return this.reconnection.onKicked(handler);
+  }
+
+  // ─── Visibility and ghosts ────────────────────────────────────────────────
+
+  // One rule for what the local player may see: their own row, minus newcomers under duplicate
+  // arbitration, minus their own previous incarnation (a refresh).
+  private isVisible(profile: PlayerProfile): boolean {
+    if (profile.peerId === this.session.getLocalPlayer()?.peerId) return true;
+    if (this.reconnection.isHiddenDuringArbitration(profile.peerId)) return false;
+    const own = this.localPlayerId();
+    return own === undefined || readPlayerId(profile.metadata) !== own;
+  }
+
+  private localPlayerId(): string | undefined {
+    const profile = this.session.getLocalPlayer();
+    return profile && readPlayerId(profile.metadata);
+  }
+
+  // A player left. Unless it is us, was removed on purpose, or already has a live replacement,
+  // keep a "reconnecting" row for the grace period instead of dropping them.
+  private handleDeparture(profile: PlayerProfile): void {
+    const playerId = readPlayerId(profile.metadata);
+    if (playerId === undefined || !this.shouldShowAsReconnecting(playerId)) {
+      this.emit(this.left, profile);
+      return;
+    }
+    const ghost: RosterPlayer = {
+      ...this.toRosterPlayer(profile),
+      connectionStatus: "reconnecting",
+      returning: false,
+    };
+    this.ghosts.add(playerId, ghost);
+    this.updated.emit(ghost);
+  }
+
+  private shouldShowAsReconnecting(playerId: string): boolean {
+    const removedOnPurpose = this.ghosts.takeRemoval(playerId);
+    const isOwn = playerId === this.localPlayerId();
+    const hasReplacement = this.session
+      .getPlayers()
+      .some((p) => readPlayerId(p.metadata) === playerId);
+    return !removedOnPurpose && !isOwn && !hasReplacement;
+  }
+
+  // The same player arrived again: any ghost row has done its job.
+  private noteArrival(profile: PlayerProfile): void {
+    const playerId = readPlayerId(profile.metadata);
+    if (playerId === undefined) return;
+    this.ghosts.takeRemoval(playerId);
+    const ghost = this.ghosts.drop(playerId);
+    if (ghost) this.left.emit(ghost);
   }
 
   private emit(emitter: Emitter<RosterPlayer>, profile: PlayerProfile): void {
@@ -169,8 +232,7 @@ export class PlayerPresenceService {
     const presence = this.reconnection.getPresence(profile.peerId);
     return {
       peerId: profile.peerId,
-      playerId:
-        typeof profile.metadata.playerId === "string" ? profile.metadata.playerId : profile.peerId,
+      playerId: readPlayerId(profile.metadata) ?? profile.peerId,
       nickname: profile.nickname,
       metadata: profile.metadata,
       connectionStatus: presence.status,

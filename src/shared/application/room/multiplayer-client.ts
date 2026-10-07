@@ -1,7 +1,7 @@
-// Composition root + facade. Exposes plain getters and `on…` callbacks only;
-// no inner class (session, presence, bus, lobby) ever leaves this file.
-// Getters are safe to call in any state, and return referentially stable
-// values between changes, so they can back a useSyncExternalStore directly.
+// Composition root + facade. Exposes plain getters and `on…` callbacks only; no inner class
+// (session, presence, bus, lobby) ever leaves this file. Getters are safe to call in any state
+// and return referentially stable values between changes, so they can back a
+// useSyncExternalStore directly.
 
 import type { PlayerSession, PlayerStores } from "@/shared/infrastructure/player";
 import type { SignalingPeerId } from "@/shared/infrastructure/signaling";
@@ -23,6 +23,7 @@ import {
 } from "@/shared/application/messaging";
 import {
   Emitter,
+  PageLifecycle,
   type AppConfig,
   type Clock,
   type IdGenerator,
@@ -62,6 +63,7 @@ export interface ClientOptions {
   games?: readonly RegisteredGame[];
 }
 
+/** Everything the client needs from outside. Built by createMultiplayerClient(). */
 export interface ClientDeps {
   /** A fresh session stack per join: peerIds must never be reused. */
   createSession(): PlayerSession;
@@ -70,6 +72,7 @@ export interface ClientDeps {
   clock: Clock;
   logger: Logger;
   config: AppConfig;
+  pageLifecycle: PageLifecycle;
 }
 
 interface GameEvent {
@@ -77,9 +80,7 @@ interface GameEvent {
   data: unknown;
 }
 
-interface GameEventDelivery {
-  name: string;
-  data: unknown;
+interface GameEventDelivery extends GameEvent {
   from: string;
 }
 
@@ -178,9 +179,6 @@ export class MultiplayerClient {
   private readonly slotEms = new Map<string, Emitter>();
   private readonly eventEms = new Map<string, Emitter<GameEventDelivery>>();
   private readonly roomOptions: RoomStateOptions;
-  private get stores(): PlayerStores {
-    return this.deps.stores;
-  }
 
   constructor(
     options: ClientOptions,
@@ -199,6 +197,10 @@ export class MultiplayerClient {
           : "unknown-game";
       },
     };
+  }
+
+  private get stores(): PlayerStores {
+    return this.deps.stores;
   }
 
   // ─── Lifecycle ────────────────────────────────────────────────────────────
@@ -239,15 +241,17 @@ export class MultiplayerClient {
     const session = this.deps.createSession();
     let parts: Parts | undefined;
     try {
-      const formerHostPeerId = this.stores.profiles.load(playerId)?.nickname;
       await session.join(options.roomId, buildLocalProfileInput(playerId, nickname), {
-        formerHostPeerId,
+        formerHost: this.stores.hostClaims.recall(options.roomId, playerId),
       });
 
       parts = this.assemble(session);
       this.parts = parts; // before start(): handlers fired by start() already see it
       this.wire(parts, playerId, nickname);
       parts.bus.start();
+      // A room creator's host event fires during join(), before wire() subscribed, so remember
+      // the seat here as well as in the host-changed handler.
+      this.rememberHostSeat(session, playerId);
     } catch (error) {
       this.parts = undefined;
       if (parts) this.disposeParts(parts);
@@ -348,11 +352,7 @@ export class MultiplayerClient {
       roomState.onChange((next, prev) => this.handleRoomStateChanged(next, prev)),
 
       session.onHostChanged((hostPeerId) => {
-        // Remember the seat so a page refresh can take it back (WebRtcService.startReclaim).
-        const localPeerId = session.getLocalPlayer()?.peerId;
-        if (session.isHost() && localPeerId && this.roomId) {
-          this.stores.hostClaims.remember(this.roomId, playerId, localPeerId);
-        }
+        this.rememberHostSeat(session, playerId);
         this.hostEm.emit(hostPeerId);
         this.syncDerived();
         parts.hostRuntime.reconcile();
@@ -388,6 +388,23 @@ export class MultiplayerClient {
           this.eventEmitter(id).emit({ name: event.name, data: event.data, from })
         )
       );
+    }
+
+    // A refresh fires pagehide (a deliberate leave removes this subscription first). Mark the
+    // host claim so the reloaded tab knows its old peer is gone and can take the seat back at once.
+    parts.cleanups.push(
+      this.deps.pageLifecycle.onPageHide(() => {
+        if (session.isHost() && this.roomId) this.stores.hostClaims.markLeaving(this.roomId);
+      })
+    );
+  }
+
+  // Remember the host seat so a page refresh can take it back. Called from the host-changed
+  // handler and right after start.
+  private rememberHostSeat(session: PlayerSession, playerId: string): void {
+    const localPeerId = session.getLocalPlayer()?.peerId;
+    if (session.isHost() && localPeerId && this.roomId) {
+      this.stores.hostClaims.remember(this.roomId, playerId, localPeerId);
     }
   }
 

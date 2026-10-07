@@ -8,11 +8,11 @@ import {
 } from "@/shared/kernel";
 import type { RoomId, SignalingPeerId, SignalingSession, WebRtcSignal } from "../signaling";
 import type { RtcConnectionProvider } from "./ports/rtc-connection-provider";
+import type { IceCandidate } from "./ports/rtc-peer-connection-port";
 import { RtcPeerLinkFactory } from "./rtc-peer-link-factory";
 import { RtcPeerRegistry } from "./rtc-peer-registry";
 import { RtcReconnectionManager } from "./rtc-reconnection-manager";
-import type { HostTransferResult, RtcPeer } from "./types";
-import { IceCandidate } from "./ports/rtc-peer-connection-port";
+import type { FormerHost, HostTransferResult, RtcPeer } from "./types";
 
 export interface WebRtcServiceDeps {
   session: SignalingSession;
@@ -29,7 +29,7 @@ export class WebRtcService {
   private readonly reconnectionManager: RtcReconnectionManager;
 
   private readonly peerJoined = new Emitter<RtcPeer>();
-  private readonly peerLeft = new Emitter<RtcPeer>();
+  private readonly peerLeft = new Emitter<{ signalingPeerId: SignalingPeerId }>();
   private readonly messageReceived = new Emitter<{ message: string; from: SignalingPeerId }>();
   private readonly hostChanged = new Emitter<SignalingPeerId | undefined>();
   private readonly cleanupFns: Array<() => void> = [];
@@ -86,7 +86,7 @@ export class WebRtcService {
   async joinRoom(
     roomId: RoomId,
     peerId?: SignalingPeerId,
-    options: { formerHostPeerId?: SignalingPeerId } = {}
+    options: { formerHost?: FormerHost } = {}
   ): Promise<void> {
     if (this.joined) throw new Error("[WebRtcService] Already joined a room.");
     this.joined = true;
@@ -104,7 +104,9 @@ export class WebRtcService {
 
     this.cleanupFns.push(
       this.registry.onPeerJoined((peer) => this.peerJoined.emit(peer)),
-      this.registry.onPeerLeft((peer) => this.peerLeft.emit(peer)),
+      this.registry.onPeerLeft((peer) =>
+        this.peerLeft.emit({ signalingPeerId: peer.signalingPeerId })
+      ),
 
       this.session.onPeerJoined((peer) => {
         this.log.debug(`Signaling peer joined: ${shortId(peer.peerId)}`);
@@ -137,8 +139,9 @@ export class WebRtcService {
     }
 
     // A refreshed host: its previous incarnation is still named in the host document.
-    if (currentHost && options.formerHostPeerId === currentHost.signalingPeerId) {
-      this.startReclaim(options.formerHostPeerId);
+    const former = options.formerHost;
+    if (currentHost && former?.peerId === currentHost.signalingPeerId) {
+      this.startReclaim(former);
     }
   }
 
@@ -152,6 +155,9 @@ export class WebRtcService {
 
   async removePeer(signalingPeerId: SignalingPeerId): Promise<void> {
     await this.session.removePeer(signalingPeerId);
+    // The membership snapshot may never fire (the doc could already be gone), so clean up
+    // locally now. Idempotent: the snapshot event, if it comes, finds nothing left to do.
+    this.handleSignalingPeerLeft(signalingPeerId);
   }
 
   // Host only. Hands the host role to a peer we have an active link to. One atomic write: it
@@ -173,6 +179,11 @@ export class WebRtcService {
 
   getPeers(): RtcPeer[] {
     return this.registry.getAll();
+  }
+
+  /** Peer ids currently in the room's membership (not the same as having a link). */
+  getMemberPeerIds(): SignalingPeerId[] {
+    return this.session.getPeers().map((p) => p.peerId);
   }
 
   getLocalPeerId(): SignalingPeerId | undefined {
@@ -215,7 +226,7 @@ export class WebRtcService {
     return this.peerJoined.on(handler);
   }
 
-  onPeerLeft(handler: (peer: RtcPeer) => void): () => void {
+  onPeerLeft(handler: (peer: { signalingPeerId: SignalingPeerId }) => void): () => void {
     return this.peerLeft.on(handler);
   }
 
@@ -257,11 +268,13 @@ export class WebRtcService {
 
   // ─── Host role ────────────────────────────────────────────────────────────
 
-  // A refreshed host returns with a fresh peerId. While the host document still names its previous
-  // incarnation, take the seat back as soon as that peer is gone from the room (the guests remove
-  // it once they notice its link died). If the document names anyone else first, the window is over.
-  private startReclaim(former: SignalingPeerId): void {
+  // A refreshed host returns with a fresh peerId. While the host document still names its
+  // previous incarnation, take the seat back as soon as that peer is gone from the room. When
+  // pagehide already told us the old page is gone, remove it ourselves instead of waiting for
+  // the guests to notice. If the document names anyone else first, the window is over.
+  private startReclaim(former: FormerHost): void {
     this.reclaim?.stop();
+    const formerId = former.peerId;
 
     let done = false;
     let busy = false;
@@ -272,7 +285,7 @@ export class WebRtcService {
       done = true;
       cancelTimer();
       offLeft();
-      if (this.reclaim?.former === former) this.reclaim = undefined;
+      if (this.reclaim?.former === formerId) this.reclaim = undefined;
     };
 
     const attempt = async (final: boolean): Promise<void> => {
@@ -283,7 +296,7 @@ export class WebRtcService {
       }
       busy = true;
       try {
-        const result = await this.session.host.claimHost(former);
+        const result = await this.session.host.claimHost(formerId);
         this.log.debug(`Host reclaim: ${result}`);
         if (result !== "former-present" || final) stop();
       } catch (error) {
@@ -299,13 +312,21 @@ export class WebRtcService {
     };
 
     const offLeft = this.session.onPeerLeft((peer) => {
-      if (peer.peerId === former) void attempt(false);
+      if (peer.peerId === formerId) void attempt(false);
     });
     const cancelTimer = this.deps.clock.after(this.deps.config.reclaimWindowMs, () => {
       void attempt(true);
     });
-    this.reclaim = { former, stop };
-    void attempt(false);
+    this.reclaim = { former: formerId, stop };
+
+    if (former.confirmedGone) {
+      void this.session
+        .removePeer(formerId)
+        .catch((error) => this.log.warn("Failed to remove former host", error))
+        .then(() => attempt(false));
+    } else {
+      void attempt(false);
+    }
   }
 
   private async handleHostChanged(
@@ -382,7 +403,11 @@ export class WebRtcService {
     this.reconnectionManager.stopWatchingForOffer(signalingPeerId);
 
     const entry = this.registry.get(signalingPeerId);
-    if (!entry) return;
+    if (!entry) {
+      // No link, but the roster may still list this peer (e.g. a freshly promoted host).
+      this.peerLeft.emit({ signalingPeerId });
+      return;
+    }
     // Remove first: closing the link below fires "connection died", which must find nothing to reconnect.
     this.registry.remove(signalingPeerId);
     this.registry.disposeEntry(entry);

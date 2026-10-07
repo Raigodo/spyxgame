@@ -16,3 +16,10 @@ export interface RtcPeer {
 }
 
 export type HostTransferResult = "transferred" | "not-host" | "target-unavailable" | "host-changed";
+
+/** A refreshed host's previous incarnation, from the host-claim hint. */
+export interface FormerHost {
+  peerId: SignalingPeerId;
+  /** True when pagehide fired just before this load: the old page is known to be gone. */
+  confirmedGone: boolean;
+}
