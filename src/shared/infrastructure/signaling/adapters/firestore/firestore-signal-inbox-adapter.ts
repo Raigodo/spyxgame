@@ -11,7 +11,7 @@ import {
   Timestamp,
   type Firestore,
 } from "firebase/firestore";
-import type { Unsubscribe } from "@/shared/kernel";
+import type { Logger, Unsubscribe } from "@/shared/kernel";
 import type { SignalInboxPort } from "../../ports/signal-inbox-port";
 import type { MessageId, RoomId, SignalingMessage, SignalingPeerId } from "../../types";
 
@@ -22,7 +22,10 @@ interface StoredMessage {
 }
 
 export class FirestoreSignalInboxAdapter implements SignalInboxPort {
-  constructor(private readonly client: Firestore) {}
+  constructor(
+    private readonly client: Firestore,
+    private readonly logger: Logger
+  ) {}
 
   private messagesRef(roomId: RoomId, peerId: SignalingPeerId) {
     return collection(this.client, "rooms", roomId, "signaling-peers", peerId, "messages");
@@ -63,19 +66,23 @@ export class FirestoreSignalInboxAdapter implements SignalInboxPort {
   ): Unsubscribe {
     const messagesQuery = query(this.messagesRef(roomId, peerId), orderBy("timestamp", "asc"));
 
-    return onSnapshot(messagesQuery, (snapshot) => {
-      for (const change of snapshot.docChanges()) {
-        if (change.type !== "added") continue;
-        const data = change.doc.data() as StoredMessage;
-        onMessage({
-          id: change.doc.id,
-          fromPeerId: data.fromPeerId,
-          toPeerId: peerId,
-          timestamp: data.timestamp.toDate(),
-          payload: data.payload,
-        });
-      }
-    });
+    return onSnapshot(
+      messagesQuery,
+      (snapshot) => {
+        for (const change of snapshot.docChanges()) {
+          if (change.type !== "added") continue;
+          const data = change.doc.data() as StoredMessage;
+          onMessage({
+            id: change.doc.id,
+            fromPeerId: data.fromPeerId,
+            toPeerId: peerId,
+            timestamp: data.timestamp.toDate(),
+            payload: data.payload,
+          });
+        }
+      },
+      (error) => this.logger.warn("Inbox subscription failed", error)
+    );
   }
 
   async clearInbox(roomId: RoomId, peerId: SignalingPeerId): Promise<void> {

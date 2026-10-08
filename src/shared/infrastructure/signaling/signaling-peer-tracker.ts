@@ -1,20 +1,22 @@
+import { Emitter } from "@/shared/kernel";
 import type { SignalingPeer, SignalingPeerId } from "./types";
-
-type PeerHandler = (peer: SignalingPeer) => void;
 
 export class SignalingPeerTracker {
   private readonly peers = new Map<SignalingPeerId, SignalingPeer>();
-  private readonly peerAddedHandlers = new Set<PeerHandler>();
-  private readonly peerRemovedHandlers = new Set<PeerHandler>();
+  private readonly added: Emitter<SignalingPeer>;
+  private readonly removed: Emitter<SignalingPeer>;
+
+  constructor(onError?: (error: unknown) => void) {
+    this.added = new Emitter<SignalingPeer>(onError);
+    this.removed = new Emitter<SignalingPeer>(onError);
+  }
 
   add(peer: SignalingPeer): void {
     if (this.peers.has(peer.peerId)) {
       throw new Error(`Peer "${peer.peerId}" is already tracked.`);
     }
     this.peers.set(peer.peerId, peer);
-    for (const handler of this.peerAddedHandlers) {
-      handler(peer);
-    }
+    this.added.emit(peer);
   }
 
   remove(peerId: SignalingPeerId): void {
@@ -23,9 +25,7 @@ export class SignalingPeerTracker {
       throw new Error(`Peer "${peerId}" is not tracked.`);
     }
     this.peers.delete(peerId);
-    for (const handler of this.peerRemovedHandlers) {
-      handler(peer);
-    }
+    this.removed.emit(peer);
   }
 
   update(peer: SignalingPeer): void {
@@ -54,21 +54,14 @@ export class SignalingPeerTracker {
   clear(): void {
     // Fire removed handlers for each peer before clearing,
     // so consumers can clean up their side too.
-    for (const peer of this.peers.values()) {
-      for (const handler of this.peerRemovedHandlers) {
-        handler(peer);
-      }
-    }
+    for (const peer of this.peers.values()) this.removed.emit(peer);
     this.peers.clear();
   }
 
-  onPeerAdded(handler: PeerHandler): () => void {
-    this.peerAddedHandlers.add(handler);
-    return () => this.peerAddedHandlers.delete(handler);
+  onPeerAdded(handler: (peer: SignalingPeer) => void): () => void {
+    return this.added.on(handler);
   }
-
-  onPeerRemoved(handler: PeerHandler): () => void {
-    this.peerRemovedHandlers.add(handler);
-    return () => this.peerRemovedHandlers.delete(handler);
+  onPeerRemoved(handler: (peer: SignalingPeer) => void): () => void {
+    return this.removed.on(handler);
   }
 }

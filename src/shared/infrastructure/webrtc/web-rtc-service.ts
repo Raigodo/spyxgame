@@ -1,5 +1,6 @@
 import {
   Emitter,
+  logFailure,
   shortId,
   type Clock,
   type IdGenerator,
@@ -54,7 +55,9 @@ export class WebRtcService {
       logger: logger.child("link"),
       onMessage: (message, from) => this.messageReceived.emit({ message, from }),
       onConnectionDied: (signalingPeerId) => {
-        void this.reconnectionManager.handleConnectionDied(signalingPeerId);
+        void this.reconnectionManager
+          .handleConnectionDied(signalingPeerId)
+          .catch(logFailure(logger, "handle dead connection"));
       },
       isHost: () => this.isHostRole,
       isLeaving: () => this.leaving,
@@ -110,7 +113,9 @@ export class WebRtcService {
 
       this.session.onPeerJoined((peer) => {
         this.log.debug(`Signaling peer joined: ${shortId(peer.peerId)}`);
-        void this.handleSignalingPeerJoined(peer.peerId);
+        void this.handleSignalingPeerJoined(peer.peerId).catch(
+          logFailure(this.log, "handle peer joined")
+        );
       }),
 
       this.session.onPeerLeft((peer) => {
@@ -119,12 +124,14 @@ export class WebRtcService {
       }),
 
       this.session.onSignalReceived((message) => {
-        void this.handleSignalReceived(message.fromPeerId, message.payload);
+        void this.handleSignalReceived(message.fromPeerId, message.payload).catch(
+          logFailure(this.log, "handle signal")
+        );
       }),
 
       this.session.host.onHostChanged((host) => {
         this.log.debug(`Host changed → ${host ? shortId(host.signalingPeerId) : "null"}`);
-        void this.handleHostChanged(host);
+        void this.handleHostChanged(host).catch(logFailure(this.log, "handle host change"));
       })
     );
 

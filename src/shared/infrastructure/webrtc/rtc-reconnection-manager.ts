@@ -19,6 +19,7 @@ export interface RtcReconnectionManagerDeps {
 export class RtcReconnectionManager {
   private readonly offerWatches = new Map<SignalingPeerId, Cancel>();
   private unsubscribeFromRegistry?: () => void;
+  private readonly guestTimers = new Set<Cancel>();
 
   constructor(private readonly deps: RtcReconnectionManagerDeps) {}
 
@@ -45,6 +46,8 @@ export class RtcReconnectionManager {
     this.clearAllOfferWatches();
     this.unsubscribeFromRegistry?.();
     this.unsubscribeFromRegistry = undefined;
+    for (const cancel of this.guestTimers) cancel();
+    this.guestTimers.clear();
   }
 
   // ─── Connection death (an active connection that dropped) ─────────────────
@@ -157,9 +160,9 @@ export class RtcReconnectionManager {
 
     this.suspectHostDead(signalingPeerId);
 
-    // Not tracked on purpose in this step (behavior unchanged); it becomes a tracked timer in the
     // WebRtcService split.
-    clock.after(config.reconnectTimeoutMs, () => {
+    const cancel = clock.after(config.reconnectTimeoutMs, () => {
+      this.guestTimers.delete(cancel);
       if (isLeaving()) return;
 
       const current = registry.get(signalingPeerId);
@@ -173,5 +176,6 @@ export class RtcReconnectionManager {
         registry.discard(signalingPeerId); // the host moved on: silent, the peer is still in the room
       }
     });
+    this.guestTimers.add(cancel);
   }
 }

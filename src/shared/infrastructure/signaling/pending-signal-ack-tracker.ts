@@ -1,4 +1,10 @@
-import { Countdown, type Clock, type Logger, type SignalingConfig } from "@/shared/kernel";
+import {
+  Countdown,
+  logFailure,
+  type Clock,
+  type Logger,
+  type SignalingConfig,
+} from "@/shared/kernel";
 import type { SignalingMailbox } from "./signaling-mailbox";
 import type { MessageId, SignalingPeerId } from "./types";
 
@@ -29,7 +35,11 @@ export class PendingSignalAckTracker {
 
     let countdown = this.countdowns.get(peerId);
     if (!countdown) {
-      countdown = new Countdown(this.deps.clock, () => void this.handleTimeout(peerId));
+      countdown = new Countdown(
+        this.deps.clock,
+        () =>
+          void this.handleTimeout(peerId).catch(logFailure(this.deps.logger, "ack timeout check"))
+      );
       this.countdowns.set(peerId, countdown);
     }
     countdown.start(this.deps.config.ackTimeoutMs);

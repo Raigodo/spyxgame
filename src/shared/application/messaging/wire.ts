@@ -1,5 +1,6 @@
 // Everything that crosses the network is parsed here, once.
 
+import { isInt, isRecord } from "@/shared/kernel";
 import type { CommandResult, PeerId } from "./types";
 
 export interface ChannelCopy {
@@ -28,19 +29,17 @@ export type Wire =
   | { __bus: 1; kind: "event"; ch: string; event: unknown }
   | { __bus: 1; kind: "recover" };
 
-const isRec = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
-const isInt = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v);
-
 function parseCopy(v: unknown): ChannelCopy | undefined {
-  if (!isRec(v) || typeof v.ch !== "string" || !isInt(v.epoch) || !isInt(v.rev)) return undefined;
-  if (!isRec(v.applied)) return undefined;
+  if (!isRecord(v) || typeof v.ch !== "string" || !isInt(v.epoch) || !isInt(v.rev))
+    return undefined;
+  if (!isRecord(v.applied)) return undefined;
   const applied: Record<string, number> = {};
   for (const [k, n] of Object.entries(v.applied)) if (isInt(n)) applied[k] = n;
   return { ch: v.ch, epoch: v.epoch, rev: v.rev, value: v.value, applied };
 }
 
 function parseResult(v: unknown): CommandResult | undefined {
-  if (!isRec(v)) return undefined;
+  if (!isRecord(v)) return undefined;
   if (v.ok === true) return { ok: true };
   if (v.ok === false)
     return { ok: false, kind: "rejected", reason: String(v.reason ?? "rejected") };
@@ -48,7 +47,7 @@ function parseResult(v: unknown): CommandResult | undefined {
 }
 
 export function parseWire(v: unknown): Wire | undefined {
-  if (!isRec(v) || v.__bus !== 1) return undefined;
+  if (!isRecord(v) || v.__bus !== 1) return undefined;
   switch (v.kind) {
     case "state": {
       const copy = parseCopy(v);

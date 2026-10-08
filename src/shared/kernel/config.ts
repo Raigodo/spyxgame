@@ -92,16 +92,12 @@ export const DEFAULT_CONFIG: AppConfig = {
   },
 };
 
-/** Section-level merge: tests pass e.g. `{ signaling: { positionIntervalMs: 10 } }`. */
 export function createConfig(overrides: ConfigOverrides = {}): AppConfig {
-  return {
-    signaling: { ...DEFAULT_CONFIG.signaling, ...overrides.signaling },
-    webrtc: { ...DEFAULT_CONFIG.webrtc, ...overrides.webrtc },
-    bus: { ...DEFAULT_CONFIG.bus, ...overrides.bus },
-    presence: { ...DEFAULT_CONFIG.presence, ...overrides.presence },
-    chat: { ...DEFAULT_CONFIG.chat, ...overrides.chat },
-    profile: { ...DEFAULT_CONFIG.profile, ...overrides.profile },
-  };
+  const result = {} as AppConfig;
+  for (const key of Object.keys(DEFAULT_CONFIG) as Array<keyof AppConfig>) {
+    result[key] = { ...DEFAULT_CONFIG[key], ...overrides[key] } as never;
+  }
+  return result;
 }
 
 // Each class takes only its own section, never the whole AppConfig.

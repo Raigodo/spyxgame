@@ -373,7 +373,10 @@ export class RoomBus {
   private handleWire(payload: unknown, from: PeerId): void {
     if (from === this.transport.getLocalPeerId()) return; // own broadcast echoed back
     const w = parseWire(payload);
-    if (!w) return;
+    if (!w) {
+      this.deps.logger.warn("Dropped invalid wire message", { from });
+      return;
+    }
 
     const hostId = this.transport.getHostPeerId();
     const iAmHost = this.transport.isHost();
@@ -411,6 +414,12 @@ export class RoomBus {
 
   private processRemoteCommand(w: Extract<Wire, { kind: "command" }>, from: PeerId): void {
     const result = this.execute(from, w.ch, w.seq, w.type, w.payload);
+    if (!result.ok)
+      this.deps.logger.debug(`Command rejected: ${result.reason}`, {
+        from,
+        ch: w.ch,
+        type: w.type,
+      });
     this.transport.send(from, { __bus: 1, kind: "ack", id: w.id, result });
   }
 
@@ -438,6 +447,9 @@ export class RoomBus {
     const hostMoved = hostId !== this.lastHostId;
     this.wasHost = iAmHost;
     this.lastHostId = hostId;
+
+    if (promoted) this.deps.logger.debug("Promoted to host");
+    if (demoted) this.deps.logger.debug("Demoted to guest");
 
     if (demoted) this.endRecovery();
     if (promoted) this.beginRecovery();
@@ -596,6 +608,12 @@ export class RoomBus {
     recovery.cancelSlide?.();
     recovery.cancelMax();
 
+    this.deps.logger.debug("Recovery finished", {
+      offers: recovery.offeredBy.size,
+      adopted: Array.from(recovery.best.keys()),
+      held: recovery.held.length,
+    });
+
     for (const channel of this.stateChannels.values()) {
       const offered = recovery.best.get(channel.id);
       if (offered) channel.adoptIfNewer(offered);
@@ -631,6 +649,7 @@ export class RoomBus {
     const next = this.computeStatus();
     if (next === this.status) return;
     this.status = next;
+    this.deps.logger.debug(`Status → ${next}`);
     this.statusChanged.emit(next);
   }
 }

@@ -1,9 +1,9 @@
 import { ConsoleLogger, DEFAULT_CONFIG, SystemClock, UlidIdGenerator } from "@/shared/kernel";
 import { FirestoreHostElectionAdapter } from "./adapters/firestore/firestore-host-election-adapter";
-import { firestoreClient } from "./adapters/firestore/firestore-client";
 import { FirestoreRoomMembershipAdapter } from "./adapters/firestore/firestore-room-membership-adapter";
 import { FirestoreSignalInboxAdapter } from "./adapters/firestore/firestore-signal-inbox-adapter";
 import { SignalingSession, type SignalingSessionDeps } from "./signaling-session";
+import { getFirestoreClient } from "./adapters/firestore/firestore-client";
 
 export type * from "./types";
 export { SignalingSession } from "./signaling-session";
@@ -19,11 +19,16 @@ export function createSignalingSession(
   const clock = overrides.clock ?? new SystemClock();
   const logger = overrides.logger ?? new ConsoleLogger("signaling");
   return new SignalingSession({
-    membership: new FirestoreRoomMembershipAdapter(firestoreClient, logger.child("membership")),
-    messages: new FirestoreSignalInboxAdapter(firestoreClient),
-    election: new FirestoreHostElectionAdapter(firestoreClient),
-    config: DEFAULT_CONFIG.signaling,
-    ...overrides,
+    membership:
+      overrides.membership ??
+      new FirestoreRoomMembershipAdapter(getFirestoreClient(), logger.child("membership")),
+    messages:
+      overrides.messages ??
+      new FirestoreSignalInboxAdapter(getFirestoreClient(), logger.child("inbox")),
+    election:
+      overrides.election ??
+      new FirestoreHostElectionAdapter(getFirestoreClient(), logger.child("election-store")),
+    config: overrides.config ?? DEFAULT_CONFIG.signaling,
     clock,
     ids: overrides.ids ?? new UlidIdGenerator(clock),
     logger,

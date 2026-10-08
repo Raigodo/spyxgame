@@ -1,4 +1,10 @@
-import type { Clock, IdGenerator, Logger, SignalingConfig } from "@/shared/kernel";
+import {
+  Emitter,
+  type Clock,
+  type IdGenerator,
+  type Logger,
+  type SignalingConfig,
+} from "@/shared/kernel";
 import { SignalingPeerTracker } from "./signaling-peer-tracker";
 import type {
   RoomId,
@@ -28,18 +34,25 @@ export interface SignalingSessionDeps {
 }
 
 export class SignalingSession {
-  private readonly tracker = new SignalingPeerTracker();
+  private readonly tracker = new SignalingPeerTracker((error) =>
+    this.deps.logger.error("Peer listener failed", error)
+  );
   private hostElectionService?: HostElectionService;
   private ackTracker?: PendingSignalAckTracker;
   private mailbox?: SignalingMailbox;
   private unsubscribeFromPeers?: () => void;
 
-  private readonly signalReceivedHandlers = new Set<SignalReceivedHandler>();
+  private readonly signalReceived: Emitter<SignalingMessage<WebRtcSignal>>;
 
   private localRoomId?: RoomId;
   private localPeerId?: SignalingPeerId;
 
-  constructor(private readonly deps: SignalingSessionDeps) {}
+  constructor(
+    private readonly deps: SignalingSessionDeps,
+    onError?: (error: unknown) => void
+  ) {
+    this.signalReceived = new Emitter<SignalingMessage<WebRtcSignal>>(onError);
+  }
 
   get roomId() {
     return this.localRoomId;
@@ -171,8 +184,8 @@ export class SignalingSession {
   }
 
   onSignalReceived(handler: SignalReceivedHandler): () => void {
-    this.signalReceivedHandlers.add(handler);
-    return () => this.signalReceivedHandlers.delete(handler);
+    this.signalReceived.on(handler);
+    return () => this.signalReceived.clear();
   }
 
   async sendOffer(
@@ -266,6 +279,6 @@ export class SignalingSession {
   }
 
   private handleSignalReceived(message: SignalingMessage<WebRtcSignal>): void {
-    for (const handler of this.signalReceivedHandlers) handler(message);
+    this.signalReceived.emit(message);
   }
 }

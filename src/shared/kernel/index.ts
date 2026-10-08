@@ -26,3 +26,5 @@ export { MemoryKeyValueStore } from "./memory-key-value-store";
 export type { PageLifecycle } from "./page-lifecycle";
 export { NullPageLifecycle } from "./page-lifecycle";
 export { BrowserPageLifecycle } from "./browser-page-lifecycle";
+export { isRecord, isInt } from "./guards";
+export { logFailure } from "./log-failure";

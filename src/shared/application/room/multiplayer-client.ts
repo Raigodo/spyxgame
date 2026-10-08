@@ -66,7 +66,7 @@ export interface ClientOptions {
 /** Everything the client needs from outside. Built by createMultiplayerClient(). */
 export interface ClientDeps {
   /** A fresh session stack per join: peerIds must never be reused. */
-  createSession(): PlayerSession;
+  createSession(peerId: string): PlayerSession;
   stores: PlayerStores;
   ids: IdGenerator;
   clock: Clock;
@@ -237,11 +237,13 @@ export class MultiplayerClient {
     const nickname =
       options.nickname?.trim() || this.stores.profiles.load(playerId)?.nickname || "Player";
 
-    // peerId is deliberately not passed: it must be fresh per join.
-    const session = this.deps.createSession();
+    // A fresh peerId per join, minted here so loggers can be scoped to it. Never reused.
+    const peerId = this.deps.ids.next();
+    const session = this.deps.createSession(peerId);
     let parts: Parts | undefined;
     try {
       await session.join(options.roomId, buildLocalProfileInput(playerId, nickname), {
+        peerId,
         formerHost: this.stores.hostClaims.recall(options.roomId, playerId),
       });
 

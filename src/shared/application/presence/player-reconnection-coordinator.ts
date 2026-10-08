@@ -19,78 +19,12 @@ import {
   readPlayerId,
 } from "./duplicate-rules";
 import type { PlayerPresence } from "./types";
-
-type PersistedMetadata = Record<string, unknown>;
-
-type PresenceEntry = { status: RtcPeerStatus; returning: boolean };
-type PresenceMap = Record<SignalingPeerId, PresenceEntry>;
-
-// Everything this layer sends travels as one event on the bus channel "presence". The bus
-// delivers the host-verified sender as `from`.
-type PresenceEvent =
-  | { t: "status"; presence: PresenceMap } // host -> all
-  | { t: "restore"; metadata: PersistedMetadata } // host -> returning peer
-  | { t: "ping"; nonce: string } // host -> old peer
-  | { t: "pong"; nonce: string } // old peer -> host
-  | { t: "rejected" } // host -> rejected peer
-  | { t: "duplicate"; playerId: string; oldPeerId: SignalingPeerId; newPeerId: SignalingPeerId } // host -> all
-  | { t: "hello" } // guest -> host: "send me the presence status"
-  | { t: "kicked" } // host -> kicked peer
-  | { t: "farewell"; playerId: string }; // host -> all: this player was removed on purpose
-
-const STATUSES: readonly string[] = ["connecting", "active", "reconnecting"];
-const isRec = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
-
-// Network input: never trust its shape.
-function parsePresenceEvent(raw: unknown): PresenceEvent | undefined {
-  if (!isRec(raw)) return undefined;
-  switch (raw.t) {
-    case "status": {
-      if (!isRec(raw.presence)) return undefined;
-      const presence: PresenceMap = {};
-      for (const [peerId, entry] of Object.entries(raw.presence)) {
-        if (
-          isRec(entry) &&
-          typeof entry.status === "string" &&
-          STATUSES.includes(entry.status) &&
-          typeof entry.returning === "boolean"
-        ) {
-          presence[peerId] = { status: entry.status as RtcPeerStatus, returning: entry.returning };
-        }
-      }
-      return { t: "status", presence };
-    }
-    case "restore":
-      return isRec(raw.metadata) ? { t: "restore", metadata: raw.metadata } : undefined;
-    case "ping":
-      return typeof raw.nonce === "string" ? { t: "ping", nonce: raw.nonce } : undefined;
-    case "pong":
-      return typeof raw.nonce === "string" ? { t: "pong", nonce: raw.nonce } : undefined;
-    case "rejected":
-      return { t: "rejected" };
-    case "duplicate":
-      return typeof raw.playerId === "string" &&
-        typeof raw.oldPeerId === "string" &&
-        typeof raw.newPeerId === "string"
-        ? {
-            t: "duplicate",
-            playerId: raw.playerId,
-            oldPeerId: raw.oldPeerId,
-            newPeerId: raw.newPeerId,
-          }
-        : undefined;
-    case "hello":
-      return { t: "hello" };
-    case "kicked":
-      return { t: "kicked" };
-    case "farewell":
-      return typeof raw.playerId === "string"
-        ? { t: "farewell", playerId: raw.playerId }
-        : undefined;
-    default:
-      return undefined;
-  }
-}
+import {
+  parsePresenceEvent,
+  type PersistedMetadata,
+  type PresenceEvent,
+  type PresenceMap,
+} from "./presence-events";
 
 interface PendingArbitration {
   nonce: string;

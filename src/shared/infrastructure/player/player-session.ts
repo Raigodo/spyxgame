@@ -191,6 +191,7 @@ export class PlayerSession {
       this.messenger.onMessage((raw, from) => this.handleIncoming(raw, from)),
 
       this.rtc.onPeerLeft((peer) => {
+        if (!this.directory.get(peer.signalingPeerId)) return; // already handled (e.g. removePeer then the snapshot)
         this.directory.remove(peer.signalingPeerId);
         if (this.rtc.isHost()) this.broadcastRoster();
       }),

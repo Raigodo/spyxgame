@@ -10,12 +10,15 @@ import {
   type DocumentData,
   type Firestore,
 } from "firebase/firestore";
-import type { Unsubscribe } from "@/shared/kernel";
 import type { HostDocument, HostElectionPort } from "../../ports/host-election-port";
 import type { RoomId, SignalingPeerId } from "../../types";
+import type { Logger, Unsubscribe } from "@/shared/kernel";
 
 export class FirestoreHostElectionAdapter implements HostElectionPort {
-  constructor(private readonly client: Firestore) {}
+  constructor(
+    private readonly client: Firestore,
+    private readonly logger: Logger
+  ) {}
 
   private hostRef(roomId: RoomId) {
     return doc(this.client, "rooms", roomId, "host", "current");
@@ -43,8 +46,10 @@ export class FirestoreHostElectionAdapter implements HostElectionPort {
   }
 
   subscribeToHost(roomId: RoomId, onChange: (host: HostDocument | null) => void): Unsubscribe {
-    return onSnapshot(this.hostRef(roomId), (snapshot) =>
-      onChange(snapshot.exists() ? toHost(snapshot.data()) : null)
+    return onSnapshot(
+      this.hostRef(roomId),
+      (snapshot) => onChange(snapshot.exists() ? toHost(snapshot.data()) : null),
+      (error) => this.logger.warn("Host subscription failed", error)
     );
   }
 

@@ -1,4 +1,12 @@
-import { Countdown, shortId, type Clock, type Logger, type SignalingConfig } from "@/shared/kernel";
+import {
+  Countdown,
+  Emitter,
+  logFailure,
+  shortId,
+  type Clock,
+  type Logger,
+  type SignalingConfig,
+} from "@/shared/kernel";
 import type { HostElectionPort, HostDocument } from "./ports/host-election-port";
 import type { RoomMembershipPort } from "./ports/room-membership-port";
 import type { SignalInboxPort } from "./ports/signal-inbox-port";
@@ -19,18 +27,29 @@ export interface HostElectionServiceDeps {
 }
 
 export class HostElectionService {
-  private readonly hostChangedHandlers = new Set<HostChangedHandler>();
+  private readonly hostChanged: Emitter<HostDocument | null>;
   private unsubscribeFromHost?: () => void;
 
   private readonly collectionWindow: Countdown;
   private readonly positionCountdown: Countdown;
   private pendingDeadHostId?: SignalingPeerId;
 
-  constructor(private readonly deps: HostElectionServiceDeps) {
-    this.collectionWindow = new Countdown(deps.clock, () => void this.onCollectionWindowElapsed());
+  constructor(
+    private readonly deps: HostElectionServiceDeps,
+    onError?: (error: unknown) => void
+  ) {
+    this.hostChanged = new Emitter<HostDocument | null>(onError);
+
+    this.collectionWindow = new Countdown(
+      deps.clock,
+      () =>
+        void this.onCollectionWindowElapsed().catch(
+          logFailure(deps.logger, "election collection window")
+        )
+    );
     this.positionCountdown = new Countdown(
       deps.clock,
-      () => void this.onPositionCountdownElapsed()
+      () => void this.onPositionCountdownElapsed().catch(logFailure(deps.logger, "election turn"))
     );
   }
 
@@ -50,7 +69,7 @@ export class HostElectionService {
       // class has to remember to do it (that was the source of one of the earlier bugs).
       this.cancelPendingElection();
 
-      for (const handler of this.hostChangedHandlers) handler(host);
+      this.hostChanged.emit(host);
     });
   }
 
@@ -59,14 +78,14 @@ export class HostElectionService {
     this.cancelPendingElection();
     this.unsubscribeFromHost?.();
     this.unsubscribeFromHost = undefined;
-    this.hostChangedHandlers.clear();
+    this.hostChanged.clear();
   }
 
   // ─── Public API ───────────────────────────────────────────────────────────
 
   onHostChanged(handler: HostChangedHandler): () => void {
-    this.hostChangedHandlers.add(handler);
-    return () => this.hostChangedHandlers.delete(handler);
+    this.hostChanged.on(handler);
+    return () => this.hostChanged.clear();
   }
 
   async currentHost(): Promise<HostDocument | null> {

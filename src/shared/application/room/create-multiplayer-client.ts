@@ -16,6 +16,7 @@ import {
   ConsoleLogger,
   DEFAULT_CONFIG,
   PageLifecycle,
+  shortId,
   SystemClock,
   UlidIdGenerator,
   type AppConfig,
@@ -59,12 +60,13 @@ export function createMultiplayerClient(
     ...(overrides.election && { election: overrides.election }),
   };
 
-  const createSession = (): PlayerSession => {
+  const createSession = (peerId: string): PlayerSession => {
+    const scoped = logger.child(shortId(peerId));
     const signaling = createSignalingSession({
       ...signalingPorts,
       clock,
       ids,
-      logger: logger.child("signaling"),
+      logger: scoped.child("signaling"),
       config: config.signaling,
     });
     const rtc = createWebRtcService({
@@ -72,13 +74,13 @@ export function createMultiplayerClient(
       connections: overrides.connections,
       clock,
       ids,
-      logger: logger.child("webrtc"),
+      logger: scoped.child("webrtc"),
       config: config.webrtc,
     });
     return new PlayerSession({
       rtc,
       messenger: createChunkedMessenger(rtc, { clock, ids, config: config.webrtc }),
-      logger: logger.child("player"),
+      logger: scoped.child("player"),
     });
   };
 
