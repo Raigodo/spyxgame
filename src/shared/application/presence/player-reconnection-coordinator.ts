@@ -1,5 +1,6 @@
 import {
   Emitter,
+  listenerFailure,
   shortId,
   type Cancel,
   type Clock,
@@ -80,11 +81,12 @@ export class PlayerReconnectionCoordinator {
   // Cancel functions for arbitrations waiting on data-channel links.
   private readonly linkWaits = new Set<() => void>();
 
-  private readonly changed = new Emitter();
-  private readonly superseded = new Emitter();
-  private readonly kicked = new Emitter();
-  private readonly farewell = new Emitter<string>();
-  private readonly revealed = new Emitter<SignalingPeerId>();
+  private readonly onListenerError = listenerFailure(() => this.log);
+  private readonly changed = new Emitter(this.onListenerError);
+  private readonly superseded = new Emitter(this.onListenerError);
+  private readonly kicked = new Emitter(this.onListenerError);
+  private readonly farewell = new Emitter<string>(this.onListenerError);
+  private readonly revealed = new Emitter<SignalingPeerId>(this.onListenerError);
   private readonly cleanupFns: Array<() => void> = [];
 
   private readonly channel: EventChannel<PresenceEvent>;
@@ -196,6 +198,26 @@ export class PlayerReconnectionCoordinator {
     this.remotePresence = {};
   }
 
+  inspect(): Record<string, unknown> {
+    const pairs = (m: ReadonlyMap<string, { oldPeerId: string; newPeerId: string }>) =>
+      Object.fromEntries(
+        Array.from(m, ([playerId, d]) => [
+          playerId,
+          { oldPeerId: d.oldPeerId, newPeerId: d.newPeerId },
+        ])
+      );
+    return {
+      wasHost: this.wasHost,
+      hostStatuses: Object.fromEntries(this.hostStatuses),
+      returning: Array.from(this.returningPeerIds),
+      historyPlayerIds: Array.from(this.history.keys()), // keys only: metadata stays out of dumps
+      remotePresence: this.remotePresence,
+      pendingArbitrations: pairs(this.pendingArbitrations),
+      activeDuplicates: pairs(this.activeDuplicates),
+      linkWaits: this.linkWaits.size,
+    };
+  }
+
   getPresence(targetPeerId: SignalingPeerId): PlayerPresence {
     const localPeerId = this.session.getLocalPlayer()?.peerId;
 
@@ -260,7 +282,7 @@ export class PlayerReconnectionCoordinator {
   }
 
   // Fires on whichever side the host's arbitration rejects.
-  onSessionSuperseded(handler: () => void): () => void {
+  onSuperseded(handler: () => void): () => void {
     return this.superseded.on(handler);
   }
 

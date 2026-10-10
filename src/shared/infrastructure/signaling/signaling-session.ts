@@ -1,5 +1,6 @@
 import {
   Emitter,
+  logFailure,
   type Clock,
   type IdGenerator,
   type Logger,
@@ -98,7 +99,9 @@ export class SignalingSession {
       logger: logger.child("acks"),
       config,
       onTimedOut: (deadPeerId) => {
-        void membership.removePeer(roomId, deadPeerId);
+        void membership
+          .removePeer(roomId, deadPeerId)
+          .catch(logFailure(logger, "remove unresponsive peer"));
       },
     });
 
@@ -133,35 +136,49 @@ export class SignalingSession {
     const { membership, messages, election, logger } = this.deps;
     const roomId = this.localRoomId;
     const localPeerId = this.localPeerId;
+    const hostElection = this.hostElectionService;
 
     this.stopTrackingPeers();
     this.mailbox?.stopReceiving();
     this.mailbox = undefined;
     this.ackTracker = undefined;
 
-    await messages.clearInbox(roomId, localPeerId).catch((error) => {
-      logger.warn("Failed to clear own inbox on leave", error);
+    // Every remote step is best-effort: one failure must not skip the rest, above all the
+    // membership removal, or a ghost stays in the room.
+    await this.bestEffort("clear own inbox", () => messages.clearInbox(roomId, localPeerId));
+
+    await this.bestEffort("release host seat", async () => {
+      const currentHost = await election.getHost(roomId);
+      if (currentHost?.signalingPeerId === localPeerId) {
+        logger.debug("Leaving as host, clearing host document");
+        await election.clearHost(roomId);
+      }
     });
 
-    const currentHost = await election.getHost(roomId);
-    if (currentHost?.signalingPeerId === localPeerId) {
-      logger.debug("Leaving as host, clearing host document");
-      await election.clearHost(roomId);
-    }
+    // Not required for correctness (candidate lists are filtered to live peers), just tidier.
+    await this.bestEffort("remove own candidacy", async () => {
+      await hostElection?.removeOwnCandidacy();
+    });
 
-    // Best-effort cleanup of any election candidacy we registered. Not required for
-    // correctness (candidate lists are filtered to live peers anyway), just tidier.
-    await this.hostElectionService?.removeOwnCandidacy();
-
-    this.hostElectionService?.stop();
+    hostElection?.stop();
     this.hostElectionService = undefined;
-
     this.tracker.clear();
 
-    await membership.removePeer(roomId, localPeerId);
+    await this.bestEffort("remove own membership", () =>
+      membership.removePeer(roomId, localPeerId)
+    );
 
     this.localRoomId = undefined;
     this.localPeerId = undefined;
+  }
+
+  /** Runs one cleanup step; a failure is logged, never thrown. */
+  private async bestEffort(what: string, step: () => Promise<void>): Promise<void> {
+    try {
+      await step();
+    } catch (error) {
+      logFailure(this.deps.logger, what)(error);
+    }
   }
 
   get host(): HostElectionService {
@@ -175,6 +192,15 @@ export class SignalingSession {
     return this.tracker.getAll();
   }
 
+  inspect(): Record<string, unknown> {
+    return {
+      roomId: this.localRoomId,
+      peerId: this.localPeerId,
+      members: this.tracker.getAll().map((p) => p.peerId),
+      election: this.hostElectionService?.inspect() ?? null,
+    };
+  }
+
   onPeerJoined(handler: (peer: SignalingPeer) => void): () => void {
     return this.tracker.onPeerAdded(handler);
   }
@@ -184,8 +210,7 @@ export class SignalingSession {
   }
 
   onSignalReceived(handler: SignalReceivedHandler): () => void {
-    this.signalReceived.on(handler);
-    return () => this.signalReceived.clear();
+    return this.signalReceived.on(handler);
   }
 
   async sendOffer(

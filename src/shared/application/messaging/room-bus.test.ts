@@ -130,9 +130,10 @@ describe("RoomBus as host", () => {
     });
   });
   it("rejects an invalid payload without changing state", () => {
-    const { bus, transport, counter } = setup();
+    const { bus, transport, counter, logger } = setup();
     bus.start();
     transport.deliver(cmd("c1", 1, "x"), "g1");
+    expect(logger.messages("info")).toContain("Command rejected: invalid-payload");
     expect(counter.get()).toBe(0);
     expect(transport.sent.at(-1)?.payload).toMatchObject({
       result: { ok: false, reason: "invalid-payload" },
@@ -173,6 +174,19 @@ describe("RoomBus as guest", () => {
     expect(counter.get()).toBe(7);
     expect(bus.getStatus()).toBe("ready");
   });
+  it("logs a command the host rejected", () => {
+    const { bus, transport, counter, logger } = setup(asGuest);
+    bus.start();
+    void counter.send("add", 1);
+    const sent = transport.sent
+      .map((m) => m.payload as { kind?: string; id?: string })
+      .find((p) => p.kind === "command");
+    transport.deliver(
+      { __bus: 1, kind: "ack", id: sent?.id, result: { ok: false, reason: "nope" } },
+      "h"
+    );
+    expect(logger.messages("info").some((m) => m.includes("nope"))).toBe(true);
+  });
 });
 
 describe("RoomBus logging", () => {
@@ -182,5 +196,35 @@ describe("RoomBus logging", () => {
     bus.start();
     transport.deliver({ nonsense: true }, "g1");
     expect(logger.messages("warn")).toContain("Dropped invalid wire message");
+  });
+  it("includes sender and kind, and does not repeat the warning inside the throttle window", () => {
+    const { bus, transport, logger } = setup();
+    bus.start();
+    transport.deliver({ kind: "x" }, "g1");
+    transport.deliver({ kind: "x" }, "g1");
+    const warns = logger.entries.filter((e) => e.level === "warn");
+    expect(warns).toHaveLength(1);
+    expect(warns[0]?.data).toMatchObject({ from: "g1", kind: "x" });
+  });
+});
+
+describe("RoomBus inspect", () => {
+  it("reports host state per channel", () => {
+    const { bus } = setup();
+    bus.start();
+    expect(bus.inspect()).toMatchObject({
+      status: "ready",
+      isHost: true,
+      recovery: null,
+      channels: { n: { epoch: 1, synced: true, commands: ["add"] } },
+    });
+  });
+  it("lists unacked commands and is JSON-safe", () => {
+    const { bus, counter } = setup(asGuest);
+    bus.start();
+    void counter.send("add", 1);
+    const state = bus.inspect();
+    expect(state).toMatchObject({ queue: [{ ch: "n", type: "add", sentTo: "h" }] });
+    expect(() => JSON.stringify(state)).not.toThrow();
   });
 });

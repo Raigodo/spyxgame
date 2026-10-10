@@ -3,16 +3,10 @@
 // from the replicated state alone.
 
 import type { CommandResult, RoomBus, StateChannel } from "@/shared/application/messaging";
-import type { LobbyConfig } from "@/shared/application/lobby";
-import {
-  INITIAL_ROOM_STATE,
-  isRecord,
-  sanitizeGameContext,
-  sanitizeLobbyConfig,
-  sanitizeRoomState,
-  type GameContext,
-  type RoomState,
-} from "./room-state";
+import { sanitizeGameContext, type GameContext } from "@/shared/application/game";
+import { sanitizeLobbyConfig, type LobbyConfig } from "@/shared/application/lobby";
+import { isRecord } from "@/shared/kernel";
+import { INITIAL_ROOM_STATE, sanitizeRoomState, type RoomState } from "./room-state";
 
 export interface RoomStateOptions {
   /** Host-side check for a game start. Return a reason string to reject. */

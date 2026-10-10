@@ -21,4 +21,8 @@ export class Countdown {
     this.cancel?.();
     this.cancel = undefined;
   }
+
+  isRunning(): boolean {
+    return this.cancel !== undefined;
+  }
 }

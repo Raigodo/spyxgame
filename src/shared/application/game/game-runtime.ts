@@ -2,13 +2,10 @@
 // client and the host reconciler only ever see GameRuntime, so heterogeneous
 // games can sit in one map without `any`.
 
-import type { LobbyConfig, LobbyMode } from "@/shared/application/lobby";
+import { sanitizeLobbyConfig, type LobbyConfig, type LobbyMode } from "@/shared/application/lobby";
 import type { StateChannel } from "@/shared/application/messaging";
-import {
-  isRecord,
-  sanitizeLobbyConfig,
-  type GameContext,
-} from "@/shared/application/room/room-state";
+import { isRecord } from "@/shared/kernel";
+import type { GameContext } from "./game-context";
 import type { CommandDef, EventDef, GameSpec, LobbyContext } from "./game-definition";
 
 /** The replicated value of a game channel while a game runs. */

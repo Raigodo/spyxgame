@@ -1,4 +1,4 @@
-// What a game's UI talks to: client.useGame(definition). Callback style like the
+// What a game's UI talks to: client.getGame(definition). Callback style like the
 // rest of the client. Safe before join and after leave (getters return
 // undefined, intents resolve as "not joined").
 

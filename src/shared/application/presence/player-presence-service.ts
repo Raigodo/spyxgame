@@ -1,5 +1,6 @@
 import {
   Emitter,
+  listenerFailure,
   type Clock,
   type IdGenerator,
   type Logger,
@@ -31,10 +32,11 @@ export class PlayerPresenceService {
   private readonly log: Logger;
   private readonly reconnection: PlayerReconnectionCoordinator;
   private readonly ghosts: DepartureGhosts;
-  private readonly joined = new Emitter<RosterPlayer>();
-  private readonly rejoined = new Emitter<RosterPlayer>();
-  private readonly updated = new Emitter<RosterPlayer>();
-  private readonly left = new Emitter<RosterPlayer>();
+  private readonly onListenerError = listenerFailure(() => this.log);
+  private readonly joined = new Emitter<RosterPlayer>(this.onListenerError);
+  private readonly rejoined = new Emitter<RosterPlayer>(this.onListenerError);
+  private readonly updated = new Emitter<RosterPlayer>(this.onListenerError);
+  private readonly left = new Emitter<RosterPlayer>(this.onListenerError);
   private readonly cleanupFns: Array<() => void> = [];
 
   constructor(deps: PlayerPresenceServiceDeps) {
@@ -131,6 +133,13 @@ export class PlayerPresenceService {
     return this.reconnection.isLocalPending();
   }
 
+  inspect(): Record<string, unknown> {
+    return {
+      ghosts: this.ghosts.list().map((g) => ({ peerId: g.peerId, playerId: g.playerId })),
+      coordinator: this.reconnection.inspect(),
+    };
+  }
+
   onPlayerJoined(handler: (player: RosterPlayer) => void): () => void {
     return this.joined.on(handler);
   }
@@ -152,9 +161,9 @@ export class PlayerPresenceService {
     return this.reconnection.onChanged(handler);
   }
 
-  // Fires on whichever side the host's duplicate-session arbitration rejects.
-  onSessionSuperseded(handler: () => void): () => void {
-    return this.reconnection.onSessionSuperseded(handler);
+  // Fires on whichever side the host's duplicate-tab arbitration rejects.
+  onSuperseded(handler: () => void): () => void {
+    return this.reconnection.onSuperseded(handler);
   }
 
   /** Host only. Removes a player from the room; they are told why. Returns false if it could not be done. */

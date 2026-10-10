@@ -1,24 +1,38 @@
-import { Emitter, type Logger } from "@/shared/kernel";
+import {
+  Emitter,
+  createThrottledWarn,
+  type Clock,
+  type Logger,
+  type ThrottledWarn,
+} from "@/shared/kernel";
 import type { RoomId, SignalingPeerId } from "../signaling";
-import type { ChunkedMessenger, FormerHost } from "../webrtc";
-import type { HostTransferResult, RtcPeer, RtcPeerStatus } from "../webrtc/types";
-import type { WebRtcService } from "../webrtc/web-rtc-service";
+import type {
+  ChunkedMessenger,
+  FormerHost,
+  HostTransferResult,
+  RtcPeer,
+  RtcPeerStatus,
+  RtcTransport,
+} from "../webrtc";
 import { parseEnvelope, type Envelope } from "./envelope-parser";
 import { PlayerDirectory } from "./player-directory";
 import type { LocalProfileInput, PlayerProfile } from "./types";
 
 export interface PlayerSessionDeps {
-  rtc: WebRtcService;
+  rtc: RtcTransport;
   messenger: ChunkedMessenger;
+  clock: Clock;
   logger: Logger;
 }
 
 // Star topology: the host connects to every guest, guests only talk to the host, and the host
 // relays broadcasts and direct messages after stamping the verified sender.
 export class PlayerSession {
-  private readonly rtc: WebRtcService;
+  private readonly rtc: RtcTransport;
   private readonly messenger: ChunkedMessenger;
   private readonly log: Logger;
+  private readonly clock: Clock;
+  private readonly warnMalformed: ThrottledWarn;
 
   private readonly directory = new PlayerDirectory();
   private readonly appMessage = new Emitter<{ payload: unknown; from: SignalingPeerId }>();
@@ -30,6 +44,8 @@ export class PlayerSession {
     this.rtc = deps.rtc;
     this.messenger = deps.messenger;
     this.log = deps.logger;
+    this.clock = deps.clock;
+    this.warnMalformed = createThrottledWarn(deps.logger, deps.clock);
   }
 
   // ─── Public API ───────────────────────────────────────────────────────────
@@ -48,7 +64,7 @@ export class PlayerSession {
       peerId: this.rtc.getLocalPeerId()!,
       nickname: profile.nickname,
       metadata: profile.metadata ?? {},
-      updatedAt: Date.now(),
+      updatedAt: this.clock.now(),
     };
     this.directory.upsert(this.localProfile);
 
@@ -97,6 +113,18 @@ export class PlayerSession {
     return this.rtc.getPeers().map((p) => p.signalingPeerId);
   }
 
+  inspect(): Record<string, unknown> {
+    return {
+      localPeerId: this.localProfile?.peerId,
+      isHost: this.rtc.isHost(),
+      hostPeerId: this.rtc.getHostPeerId(),
+      roster: this.directory
+        .getAll()
+        .map((p) => ({ peerId: p.peerId, nickname: p.nickname, updatedAt: p.updatedAt })),
+      rtc: this.rtc.inspect(),
+    };
+  }
+
   // Fires whenever the host changes (elected, re-elected, or cleared).
   onHostChanged(handler: (hostPeerId: SignalingPeerId | undefined) => void): () => void {
     return this.rtc.onHostChanged(handler);
@@ -112,7 +140,7 @@ export class PlayerSession {
       metadata: patch.metadata
         ? { ...this.localProfile.metadata, ...patch.metadata }
         : this.localProfile.metadata,
-      updatedAt: Date.now(),
+      updatedAt: this.clock.now(),
     };
     this.directory.upsert(this.localProfile);
 
@@ -252,7 +280,7 @@ export class PlayerSession {
   private handleIncoming(raw: string, from: SignalingPeerId): void {
     let envelope = parseEnvelope(raw);
     if (!envelope) {
-      this.log.warn("Ignoring malformed message");
+      this.warnMalformed(`envelope:${from}`, "Ignoring malformed message", { from });
       return;
     }
 

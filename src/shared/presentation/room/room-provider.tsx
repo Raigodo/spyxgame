@@ -7,6 +7,7 @@ import { createMultiplayerClient } from "@/shared/application/room";
 import { GAMES } from "./games";
 import { RoomContext, useRoom, type RoomContextValue } from "./room-context";
 import { usePhase, useRoomStatus } from "./room-hooks";
+import { installDebugHook } from "./debug-hook";
 import { RoomNavigator } from "./room-navigator";
 
 // Pages keep importing useRoom from here.
@@ -61,8 +62,9 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     let cancelled = false;
     const client = createMultiplayerClient({ games: GAMES });
     // Subscribed before joining, so a supersede during the join is never missed.
-    const offSuperseded = client.onSessionSuperseded(() => setSuperseded(true));
+    const offSuperseded = client.onSuperseded(() => setSuperseded(true));
     const offKicked = client.onKicked(() => setKicked(true));
+    const offDebug = process.env.NODE_ENV === "production" ? () => {} : installDebugHook(client);
 
     // Deferred a tick so React StrictMode's mount → cleanup → mount in dev
     // never starts two joins with the same playerId (which would trigger
@@ -94,6 +96,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
       clearTimeout(timer);
       offSuperseded();
       offKicked();
+      offDebug();
       setKicked(false);
       setValue(null);
       setError(null);

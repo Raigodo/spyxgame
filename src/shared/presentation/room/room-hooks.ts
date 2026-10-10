@@ -99,7 +99,7 @@ export function useGameHandle<C, S, Cmds extends object, Evs extends object, M e
   game: GameDefinition<C, S, Cmds, Evs, M>
 ) {
   const { client } = useRoom();
-  return client.useGame(game);
+  return client.getGame(game);
 }
 
 /**

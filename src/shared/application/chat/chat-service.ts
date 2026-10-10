@@ -2,7 +2,14 @@
 // event channel (ephemeral, no replay). History lives here, so it survives page navigation
 // inside the room. It does not survive a refresh, and late joiners don't see earlier messages.
 
-import { Emitter, shortId, type ChatConfig, type Clock, type IdGenerator } from "@/shared/kernel";
+import {
+  Emitter,
+  isRecord,
+  shortId,
+  type ChatConfig,
+  type Clock,
+  type IdGenerator,
+} from "@/shared/kernel";
 import type { EventChannel, RoomBus } from "@/shared/application/messaging";
 import { RateLimiter } from "./rate-limiter";
 
@@ -116,12 +123,10 @@ export class ChatService {
 
   // Network input: never trust its shape.
   private parsePayload(v: unknown): ChatPayload | undefined {
-    if (typeof v !== "object" || v === null) return undefined;
-    const r = v as Record<string, unknown>;
-    if (typeof r.text !== "string") return undefined;
-    const text = r.text.trim();
+    if (!isRecord(v) || typeof v.text !== "string") return undefined;
+    const text = v.text.trim();
     if (!text || text.length > this.deps.config.maxTextLength) return undefined;
-    return { text, direct: r.direct === true };
+    return { text, direct: v.direct === true };
   }
 
   private receive(payload: ChatPayload, from: string): void {

@@ -1,4 +1,4 @@
-import { Emitter, shortId, type Logger } from "@/shared/kernel";
+import { Emitter, listenerFailure, shortId, type Logger } from "@/shared/kernel";
 import type { SignalingPeerId } from "../signaling";
 import type { PeerEntry, RtcPeer, RtcPeerStatus } from "./types";
 
@@ -8,9 +8,10 @@ export interface RtcPeerRegistryDeps {
 
 export class RtcPeerRegistry {
   private readonly peers = new Map<SignalingPeerId, PeerEntry>();
-  private readonly joined = new Emitter<RtcPeer>();
-  private readonly left = new Emitter<RtcPeer>();
-  private readonly statusChanged = new Emitter<RtcPeer>();
+  private readonly onListenerError = listenerFailure(() => this.deps.logger);
+  private readonly joined = new Emitter<RtcPeer>(this.onListenerError);
+  private readonly left = new Emitter<RtcPeer>(this.onListenerError);
+  private readonly statusChanged = new Emitter<RtcPeer>(this.onListenerError);
 
   constructor(private readonly deps: RtcPeerRegistryDeps) {}
 
@@ -33,6 +34,15 @@ export class RtcPeerRegistry {
 
   entries(): IterableIterator<[SignalingPeerId, PeerEntry]> {
     return this.peers.entries();
+  }
+
+  inspect(): Record<string, unknown> {
+    return Object.fromEntries(
+      Array.from(this.peers, ([id, entry]) => [
+        id,
+        { status: entry.status, linkState: entry.connection?.getState() ?? null },
+      ])
+    );
   }
 
   // ─── Mutations ────────────────────────────────────────────────────────────

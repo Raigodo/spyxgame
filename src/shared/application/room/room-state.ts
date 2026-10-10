@@ -1,29 +1,14 @@
 // The one replicated room-level value. Owned by the host, carried by a
 // RoomBus state channel, validated here because it arrives over the network.
 
-import type { LobbyConfig } from "@/shared/application/lobby";
+import { sanitizeGameContext, type ActiveGame } from "@/shared/application/game";
+import { sanitizeLobbyConfig, type LobbyConfig } from "@/shared/application/lobby";
+import { isRecord } from "@/shared/kernel";
+
+// Kept here so existing imports of these two types from the room module keep working.
+export type { ActiveGame, GameContext } from "@/shared/application/game";
 
 export type RoomPhase = "lobby" | "in-game";
-
-/**
- * Frozen by the host at game start, replicated with the room state, so a
- * newly promoted host (or a refreshed tab) boots the running game from it.
- */
-export interface GameContext {
-  /** Which lobby type the game was started from. */
-  lobby: LobbyConfig;
-  /** playerId -> teamId, empty unless lobby.mode === "teams". Keyed by the durable id. */
-  teams: Record<string, string>;
-  /** playerIds present at start. Anyone else who shows up later is a spectator by default. */
-  participants: string[];
-}
-
-export interface ActiveGame {
-  id: string;
-  /** Opaque here. The game definition (step 5) validates and types it. */
-  config: unknown;
-  context: GameContext;
-}
 
 export interface RoomState {
   phase: RoomPhase;
@@ -38,36 +23,6 @@ export const INITIAL_ROOM_STATE: RoomState = {
   lobby: { mode: "free-for-all" },
   round: 0,
 };
-
-export const isRecord = (v: unknown): v is Record<string, unknown> =>
-  typeof v === "object" && v !== null;
-
-export function sanitizeLobbyConfig(v: unknown): LobbyConfig | undefined {
-  if (!isRecord(v)) return undefined;
-  if (v.mode === "free-for-all") return { mode: "free-for-all" };
-  if (v.mode === "teams" && Array.isArray(v.teamIds)) {
-    const ids = v.teamIds
-      .filter((t): t is string => typeof t === "string")
-      .map((t) => t.trim())
-      .filter((t) => t.length > 0 && t.length <= 32);
-    const unique = Array.from(new Set(ids));
-    if (unique.length >= 2 && unique.length <= 8) return { mode: "teams", teamIds: unique };
-  }
-  return undefined;
-}
-
-export function sanitizeGameContext(v: unknown): GameContext | undefined {
-  if (!isRecord(v)) return undefined;
-  const lobby = sanitizeLobbyConfig(v.lobby);
-  if (!lobby || !isRecord(v.teams) || !Array.isArray(v.participants)) return undefined;
-
-  const teams: Record<string, string> = {};
-  for (const [playerId, teamId] of Object.entries(v.teams)) {
-    if (typeof teamId === "string") teams[playerId] = teamId;
-  }
-  const participants = v.participants.filter((p): p is string => typeof p === "string");
-  return { lobby, teams, participants };
-}
 
 export function sanitizeRoomState(v: unknown): RoomState | undefined {
   if (!isRecord(v)) return undefined;

@@ -10,7 +10,16 @@ import type {
   StateChannelOptions,
 } from "./types";
 import { parseWire, type ChannelCopy, type Wire } from "./wire";
-import { Emitter, type Cancel, type Clock, type IdGenerator, type Logger } from "@/shared/kernel";
+import {
+  Emitter,
+  createThrottledWarn,
+  isRecord,
+  type Cancel,
+  type Clock,
+  type IdGenerator,
+  type Logger,
+  type ThrottledWarn,
+} from "@/shared/kernel";
 import {
   compareVersions,
   computeBusStatus,
@@ -47,6 +56,7 @@ interface BusStateChannel {
   promote(): void;
   sendSnapshot(to: PeerId): void;
   execute(from: PeerId, seq: number, type: string, payload: unknown): CommandResult;
+  inspect(): Record<string, unknown>;
 }
 
 interface BusEventChannel {
@@ -116,6 +126,17 @@ export class StateChannel<S> implements BusStateChannel {
   }
   /** @internal */ markUnsynced(): void {
     this.synced = false;
+  }
+
+  /** @internal Values are left out on purpose: they can be large. */
+  inspect(): Record<string, unknown> {
+    return {
+      epoch: this.epoch,
+      rev: this.rev,
+      synced: this.synced,
+      applied: { ...this.applied },
+      commands: Array.from(this.handlers.keys()),
+    };
   }
 
   /** @internal */
@@ -280,6 +301,7 @@ export class RoomBus {
   private readonly statusChanged = new Emitter<BusStatus>();
   private readonly cleanups: Array<() => void> = [];
   private readonly channelHost: ChannelHost;
+  private readonly warnInvalidWire: ThrottledWarn;
 
   private lastHostId?: PeerId;
   private cancelResync?: Cancel;
@@ -294,6 +316,7 @@ export class RoomBus {
     this.transport = deps.transport;
     this.options = deps.config;
     this.queue = new CommandQueue(deps.clock);
+    this.warnInvalidWire = createThrottledWarn(deps.logger, deps.clock);
     // Built here, not as a field initializer, so it never depends on field-initialization order.
     this.channelHost = {
       transport: deps.transport,
@@ -355,6 +378,37 @@ export class RoomBus {
     return this.status;
   }
 
+  inspect(): Record<string, unknown> {
+    const recovery = this.recovery;
+    return {
+      status: this.status,
+      started: this.started,
+      localPeerId: this.transport.getLocalPeerId(),
+      hostPeerId: this.transport.getHostPeerId(),
+      isHost: this.transport.isHost(),
+      seq: this.seq,
+      resyncing: this.cancelResync !== undefined,
+      recovery: recovery
+        ? {
+            offeredBy: Array.from(recovery.offeredBy),
+            adopted: Array.from(recovery.best.keys()),
+            held: recovery.held.length,
+          }
+        : null,
+      queue: this.queue.pending().map((c) => ({
+        id: c.id,
+        seq: c.seq,
+        ch: c.ch,
+        type: c.type,
+        sentTo: c.sentTo,
+      })),
+      channels: Object.fromEntries(
+        Array.from(this.stateChannels, ([id, channel]) => [id, channel.inspect()])
+      ),
+      eventChannels: Array.from(this.eventChannels.keys()),
+    };
+  }
+
   onStatusChanged(handler: (status: BusStatus) => void): () => void {
     return this.statusChanged.on(handler);
   }
@@ -374,7 +428,10 @@ export class RoomBus {
     if (from === this.transport.getLocalPeerId()) return; // own broadcast echoed back
     const w = parseWire(payload);
     if (!w) {
-      this.deps.logger.warn("Dropped invalid wire message", { from });
+      this.warnInvalidWire(`wire:${from}`, "Dropped invalid wire message", {
+        from,
+        kind: isRecord(payload) ? payload.kind : typeof payload,
+      });
       return;
     }
 
@@ -388,7 +445,12 @@ export class RoomBus {
         this.refreshStatus();
         break;
       case "ack":
-        if (from === hostId) this.queue.ack(w.id, w.result);
+        if (from === hostId) {
+          if (!w.result.ok) {
+            this.deps.logger.info(`Command ${w.id} rejected by host: ${w.result.reason}`);
+          }
+          this.queue.ack(w.id, w.result);
+        }
         break;
       case "event":
         this.eventChannels.get(w.ch)?.receive(w.event, from);
@@ -415,7 +477,7 @@ export class RoomBus {
   private processRemoteCommand(w: Extract<Wire, { kind: "command" }>, from: PeerId): void {
     const result = this.execute(from, w.ch, w.seq, w.type, w.payload);
     if (!result.ok)
-      this.deps.logger.debug(`Command rejected: ${result.reason}`, {
+      this.deps.logger.info(`Command rejected: ${result.reason}`, {
         from,
         ch: w.ch,
         type: w.type,
@@ -448,8 +510,8 @@ export class RoomBus {
     this.wasHost = iAmHost;
     this.lastHostId = hostId;
 
-    if (promoted) this.deps.logger.debug("Promoted to host");
-    if (demoted) this.deps.logger.debug("Demoted to guest");
+    if (promoted) this.deps.logger.debug("Promoted to host", { host: hostId });
+    if (demoted) this.deps.logger.debug("Demoted to guest", { host: hostId });
 
     if (demoted) this.endRecovery();
     if (promoted) this.beginRecovery();
@@ -649,7 +711,11 @@ export class RoomBus {
     const next = this.computeStatus();
     if (next === this.status) return;
     this.status = next;
-    this.deps.logger.debug(`Status → ${next}`);
+    this.deps.logger.debug(`Status → ${next}`, {
+      host: this.transport.getHostPeerId(),
+      isHost: this.transport.isHost(),
+      recovering: this.recovery !== undefined,
+    });
     this.statusChanged.emit(next);
   }
 }

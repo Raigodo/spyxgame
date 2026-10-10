@@ -188,6 +188,19 @@ export class WebRtcService {
     return this.registry.getAll();
   }
 
+  inspect(): Record<string, unknown> {
+    return {
+      role: this.isHostRole ? "host" : "guest",
+      joined: this.joined,
+      leaving: this.leaving,
+      hostPeerId: this.currentHostPeerId,
+      reclaimFormer: this.reclaim?.former ?? null,
+      links: this.registry.inspect(),
+      reconnection: this.reconnectionManager.inspect(),
+      signaling: this.session.inspect(),
+    };
+  }
+
   /** Peer ids currently in the room's membership (not the same as having a link). */
   getMemberPeerIds(): SignalingPeerId[] {
     return this.session.getPeers().map((p) => p.peerId);

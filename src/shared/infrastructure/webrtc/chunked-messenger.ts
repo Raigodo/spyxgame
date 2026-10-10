@@ -1,8 +1,11 @@
 import {
   Emitter,
+  createThrottledWarn,
   type Cancel,
   type Clock,
   type IdGenerator,
+  type Logger,
+  type ThrottledWarn,
   type WebRtcConfig,
 } from "@/shared/kernel";
 import type { SignalingPeerId } from "../signaling";
@@ -19,6 +22,7 @@ export interface ChunkedMessengerDeps {
   rtc: RawMessaging;
   clock: Clock;
   ids: IdGenerator;
+  logger: Logger;
   config: WebRtcConfig;
 }
 
@@ -27,12 +31,14 @@ export interface ChunkedMessengerDeps {
 // out of order relative to each other.
 export class ChunkedMessenger {
   private readonly reassembler: ChunkReassembler;
+  private readonly warnInvalid: ThrottledWarn;
   private readonly messageReceived = new Emitter<{ message: string; from: SignalingPeerId }>();
   private cancelCleanup?: Cancel;
   private readonly unsubscribeFromRtc: () => void;
 
   constructor(private readonly deps: ChunkedMessengerDeps) {
     this.reassembler = new ChunkReassembler(deps.config.chunkBufferTtlMs);
+    this.warnInvalid = createThrottledWarn(deps.logger, deps.clock);
     this.unsubscribeFromRtc = deps.rtc.onMessage((raw, from) => this.handleIncoming(raw, from));
   }
 
@@ -74,6 +80,8 @@ export class ChunkedMessenger {
     } else if (incoming.kind === "chunk") {
       const full = this.reassembler.accept(from, incoming.envelope, this.deps.clock.now());
       if (full !== undefined) this.messageReceived.emit({ message: full, from });
+    } else {
+      this.warnInvalid(`chunk:${from}`, "Dropped invalid chunk", { from });
     }
   }
 }

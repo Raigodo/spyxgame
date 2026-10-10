@@ -84,8 +84,7 @@ export class HostElectionService {
   // ─── Public API ───────────────────────────────────────────────────────────
 
   onHostChanged(handler: HostChangedHandler): () => void {
-    this.hostChanged.on(handler);
-    return () => this.hostChanged.clear();
+    return this.hostChanged.on(handler);
   }
 
   async currentHost(): Promise<HostDocument | null> {
@@ -203,6 +202,14 @@ export class HostElectionService {
   // Lets a caller check whether a specific peer is the one currently being waited on.
   getSuspectedDeadHostId(): SignalingPeerId | undefined {
     return this.pendingDeadHostId;
+  }
+
+  inspect(): Record<string, unknown> {
+    return {
+      suspectedDeadHostId: this.pendingDeadHostId,
+      collectionWindowRunning: this.collectionWindow.isRunning(),
+      positionCountdownRunning: this.positionCountdown.isRunning(),
+    };
   }
 
   // ─── Private ──────────────────────────────────────────────────────────────

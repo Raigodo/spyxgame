@@ -27,4 +27,6 @@ export type { PageLifecycle } from "./page-lifecycle";
 export { NullPageLifecycle } from "./page-lifecycle";
 export { BrowserPageLifecycle } from "./browser-page-lifecycle";
 export { isRecord, isInt } from "./guards";
-export { logFailure } from "./log-failure";
+export { logFailure, listenerFailure } from "./log-failure";
+export { createThrottledWarn } from "./throttled-warn";
+export type { ThrottledWarn } from "./throttled-warn";

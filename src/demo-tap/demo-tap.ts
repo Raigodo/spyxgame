@@ -4,6 +4,7 @@
 
 import { defineGame } from "@/shared/application/game";
 import type { LobbyMode } from "@/shared/application/lobby";
+import { isRecord } from "@/shared/kernel";
 
 export interface TapConfig {
   goal: number;
@@ -23,8 +24,6 @@ type TapCommands = {
 type TapEvents = {
   emote: { emoji: string };
 };
-
-const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
 
 export const demoTap = defineGame<TapConfig, TapState, TapCommands, TapEvents, LobbyMode>({
   id: "demo-tap",

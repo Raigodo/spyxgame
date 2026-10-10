@@ -8,6 +8,7 @@ export { WebRtcService } from "./web-rtc-service";
 export type { WebRtcServiceDeps } from "./web-rtc-service";
 export { ChunkedMessenger } from "./chunked-messenger";
 export type { ChunkedMessengerDeps, RawMessaging } from "./chunked-messenger";
+export type { RtcTransport } from "./rtc-transport";
 export type { FormerHost, HostTransferResult, RtcPeer, RtcPeerStatus } from "./types";
 export type { RtcConnectionProvider } from "./ports/rtc-connection-provider";
 export type { RtcDataChannelPort } from "./ports/rtc-data-channel-port";
@@ -45,5 +46,6 @@ export function createChunkedMessenger(
     rtc,
     clock,
     ids: overrides.ids ?? new UlidIdGenerator(clock),
+    logger: overrides.logger ?? new ConsoleLogger("chunks"),
   });
 }

@@ -7,9 +7,16 @@
 // state alone.
 
 import type { StateChannel } from "@/shared/application/messaging";
-import type { RoomState } from "@/shared/application/room/room-state";
+import type { ActiveGame } from "./game-context";
 import type { GameRuntime, SlotValue } from "./game-runtime";
 import type { Logger } from "@/shared/kernel";
+
+/** The part of the room state the host runtime reads. RoomState satisfies it. */
+export interface HostRoomView {
+  phase: "lobby" | "in-game";
+  round: number;
+  game?: ActiveGame;
+}
 
 export interface GameHostEntry {
   runtime: GameRuntime;
@@ -19,7 +26,7 @@ export interface GameHostEntry {
 export interface GameHostDeps {
   /** True only when this client is host and the bus finished recovery. */
   isHostReady(): boolean;
-  getRoomState(): RoomState;
+  getRoomState(): HostRoomView;
   getRosterPlayerIds(): string[];
   logger: Logger;
 }

@@ -51,8 +51,8 @@ export type ConfigOverrides = { [K in keyof AppConfig]?: Partial<AppConfig[K]> }
 
 export const DEFAULT_CONFIG: AppConfig = {
   signaling: {
-    candidateCollectionWindowMs: 5_000,
-    positionIntervalMs: 5_000,
+    candidateCollectionWindowMs: 3_000,
+    positionIntervalMs: 2_000,
     ackTimeoutMs: 15_000,
   },
   webrtc: {

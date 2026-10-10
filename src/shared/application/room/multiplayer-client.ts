@@ -24,6 +24,8 @@ import {
 import {
   Emitter,
   PageLifecycle,
+  isRecord,
+  logFailure,
   type AppConfig,
   type Clock,
   type IdGenerator,
@@ -257,7 +259,7 @@ export class MultiplayerClient {
     } catch (error) {
       this.parts = undefined;
       if (parts) this.disposeParts(parts);
-      await session.leave().catch(() => {});
+      await session.leave().catch(logFailure(this.deps.logger, "leave after failed join"));
       this.lifecycle = "idle";
       this.syncDerived();
       throw error;
@@ -321,8 +323,8 @@ export class MultiplayerClient {
       const events = bus.eventChannel<GameEvent>({
         id: `game:${id}:events`,
         validate: (raw) => {
-          if (typeof raw !== "object" || raw === null) return undefined;
-          const { name, data } = raw as { name?: unknown; data?: unknown };
+          if (!isRecord(raw)) return undefined;
+          const { name, data } = raw;
           if (typeof name !== "string") return undefined;
           const valid = runtime.validateEvent(name, data);
           return valid === undefined ? undefined : { name, data: valid };
@@ -368,7 +370,7 @@ export class MultiplayerClient {
       lobby.onPlayerLeft((p) => this.relay(this.leftEm, p)),
 
       presence.onPresenceChanged(() => this.refreshPending()),
-      presence.onSessionSuperseded(() => this.handleSuperseded()),
+      presence.onSuperseded(() => this.handleSuperseded()),
       presence.onKicked(() => this.handleKicked()),
 
       // Nickname persistence is the client's job, not the UI's.
@@ -521,6 +523,37 @@ export class MultiplayerClient {
     return !!context && !!this.playerId && !context.participants.includes(this.playerId);
   }
 
+  /**
+   * Diagnostic snapshot of the whole stack as plain JSON, computed on demand. Deliberately has no
+   * matching callback and nothing in the app reads it. The shape is not a stable API.
+   */
+  getDebugState(): Record<string, unknown> {
+    const parts = this.parts;
+    return {
+      lifecycle: this.lifecycle,
+      status: this.status,
+      hasSynced: this.hasSynced,
+      phase: this.phase,
+      roomId: this.roomId,
+      playerId: this.playerId,
+      pending: this.pending,
+      lobby: this.lobbyInfo,
+      players: this.players.map((p) => ({
+        peerId: p.peerId,
+        playerId: p.playerId,
+        nickname: p.nickname,
+        connection: p.connectionStatus,
+        returning: p.returning,
+        ready: p.ready,
+        teamId: p.teamId,
+      })),
+      roomState: parts?.roomState.getState() ?? null,
+      bus: parts?.bus.inspect() ?? null,
+      presence: parts?.presence.inspect() ?? null,
+      session: parts?.session.inspect() ?? null,
+    };
+  }
+
   // ─── Events ───────────────────────────────────────────────────────────────
 
   onStatusChanged(handler: (status: ClientStatus) => void): () => void {
@@ -544,7 +577,7 @@ export class MultiplayerClient {
     return this.playerIdEm.on(handler);
   }
 
-  onSessionSuperseded(handler: () => void): () => void {
+  onSuperseded(handler: () => void): () => void {
     return this.supersededEm.on(handler);
   }
 
@@ -676,7 +709,7 @@ export class MultiplayerClient {
   }
 
   /** The typed handle for a registered game. Same handle every call. */
-  useGame<C, S, Cmds extends object, Evs extends object, M extends LobbyMode>(
+  getGame<C, S, Cmds extends object, Evs extends object, M extends LobbyMode>(
     game: GameDefinition<C, S, Cmds, Evs, M>
   ): GameHandle<C, S, Cmds, Evs, M> {
     if (!this.registry.has(game.id)) {

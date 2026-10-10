@@ -1,3 +1,4 @@
+import { isInt } from "@/shared/kernel";
 import type { SignalingPeerId } from "../signaling";
 
 export interface ChunkEnvelope {
@@ -13,8 +14,6 @@ export type IncomingKind =
   | { kind: "chunk"; envelope: ChunkEnvelope }
   /** Claims to be a chunk but is malformed or out of bounds. Dropped. */
   | { kind: "invalid" };
-
-const isInt = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v);
 
 /** Splits into envelopes of at most `maxChunkSize` characters (UTF-16 units, not bytes). */
 export function splitMessage(message: string, maxChunkSize: number, messageId: string): string[] {

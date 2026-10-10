@@ -1,3 +1,4 @@
+import { isRecord } from "@/shared/kernel";
 import type { SignalingPeerId } from "../signaling";
 import type { PlayerProfile } from "./types";
 
@@ -12,9 +13,6 @@ export type Envelope =
       to: SignalingPeerId;
       payload: unknown;
     };
-
-const isRecord = (v: unknown): v is Record<string, unknown> =>
-  typeof v === "object" && v !== null && !Array.isArray(v);
 
 function parseProfile(v: unknown): PlayerProfile | undefined {
   if (

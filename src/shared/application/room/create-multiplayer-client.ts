@@ -78,8 +78,14 @@ export function createMultiplayerClient(
       config: config.webrtc,
     });
     return new PlayerSession({
+      clock,
       rtc,
-      messenger: createChunkedMessenger(rtc, { clock, ids, config: config.webrtc }),
+      messenger: createChunkedMessenger(rtc, {
+        clock,
+        ids,
+        config: config.webrtc,
+        logger: scoped.child("chunks"),
+      }),
       logger: scoped.child("player"),
     });
   };
