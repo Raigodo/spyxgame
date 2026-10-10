@@ -1,16 +1,12 @@
-// Adding a game = one line in each of the two lists below, plus its page.
+// Adding a game = one entry below, plus its page at app/room/[roomId]<route>/page.tsx.
 
 import { demoTap } from "@/demo-tap/demo-tap";
-import type { RegisteredGame } from "@/shared/application/game";
+import { createGameRegistry } from "./game-registry";
+
+const registry = createGameRegistry([{ definition: demoTap, route: "/demo-game" }]);
 
 /** Every game the room client can run. */
-export const GAMES: readonly RegisteredGame[] = [demoTap];
+export const GAMES = registry.games;
 
-/** Sub-route (under /room/[roomId]) that renders each game. */
-const GAME_ROUTES: Record<string, string> = {
-  [demoTap.id]: "/demo-game",
-};
-
-export function gameRoute(gameId: string): string | undefined {
-  return GAME_ROUTES[gameId];
-}
+/** Sub-route (under /room/[roomId]) that renders a game, if this client knows it. */
+export const gameRoute = registry.gameRoute;

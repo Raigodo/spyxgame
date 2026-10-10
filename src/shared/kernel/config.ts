@@ -10,6 +10,11 @@ export interface AppConfig {
     candidateCollectionWindowMs: number;
     positionIntervalMs: number;
     ackTimeoutMs: number;
+    /** Firestore TTL for signal messages and election candidates (transient). */
+    messageRetentionMs: number;
+    candidateRetentionMs: number;
+    /** Firestore TTL for room, membership and host docs. A live session longer than this loses them. */
+    roomRetentionMs: number;
   };
   webrtc: {
     iceServers: readonly IceServerConfig[];
@@ -54,6 +59,9 @@ export const DEFAULT_CONFIG: AppConfig = {
     candidateCollectionWindowMs: 3_000,
     positionIntervalMs: 2_000,
     ackTimeoutMs: 15_000,
+    messageRetentionMs: 60 * 60 * 1000,
+    candidateRetentionMs: 60 * 60 * 1000,
+    roomRetentionMs: 7 * 24 * 60 * 60 * 1000,
   },
   webrtc: {
     iceServers: [

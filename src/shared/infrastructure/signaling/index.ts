@@ -18,17 +18,27 @@ export function createSignalingSession(
 ): SignalingSession {
   const clock = overrides.clock ?? new SystemClock();
   const logger = overrides.logger ?? new ConsoleLogger("signaling");
+  const config = overrides.config ?? DEFAULT_CONFIG.signaling;
+  const retention = { clock, config };
   return new SignalingSession({
     membership:
       overrides.membership ??
-      new FirestoreRoomMembershipAdapter(getFirestoreClient(), logger.child("membership")),
+      new FirestoreRoomMembershipAdapter(
+        getFirestoreClient(),
+        logger.child("membership"),
+        retention
+      ),
     messages:
       overrides.messages ??
-      new FirestoreSignalInboxAdapter(getFirestoreClient(), logger.child("inbox")),
+      new FirestoreSignalInboxAdapter(getFirestoreClient(), logger.child("inbox"), retention),
     election:
       overrides.election ??
-      new FirestoreHostElectionAdapter(getFirestoreClient(), logger.child("election-store")),
-    config: overrides.config ?? DEFAULT_CONFIG.signaling,
+      new FirestoreHostElectionAdapter(
+        getFirestoreClient(),
+        logger.child("election-store"),
+        retention
+      ),
+    config,
     clock,
     ids: overrides.ids ?? new UlidIdGenerator(clock),
     logger,

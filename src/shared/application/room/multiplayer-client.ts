@@ -15,9 +15,7 @@ import {
   type LobbyPlayer,
 } from "@/shared/application/lobby";
 import {
-  EventChannel,
   RoomBus,
-  StateChannel,
   createSessionTransport,
   type CommandResult,
 } from "@/shared/application/messaging";
@@ -25,7 +23,10 @@ import {
   Emitter,
   PageLifecycle,
   isRecord,
+  listenerFailure,
   logFailure,
+  Store,
+  structurallyEqual,
   type AppConfig,
   type Clock,
   type IdGenerator,
@@ -36,13 +37,17 @@ import type { ActiveGame, GameContext, RoomPhase, RoomState } from "./room-state
 import {
   GameHandle,
   GameHostRuntime,
-  type GameBackend,
   type GameDefinition,
-  type GameRuntime,
   type RegisteredGame,
-  type Slot,
   type SlotValue,
 } from "@/shared/application/game";
+import {
+  ClientGameBackend,
+  NOT_JOINED,
+  type GameEvent,
+  type GameParts,
+} from "./client-game-backend";
+import { HostSeatKeeper, type SeatSource } from "./host-seat-keeper";
 
 export type ClientStatus = "idle" | "joining" | "syncing" | "ready" | "superseded" | "kicked";
 
@@ -77,21 +82,6 @@ export interface ClientDeps {
   pageLifecycle: PageLifecycle;
 }
 
-interface GameEvent {
-  name: string;
-  data: unknown;
-}
-
-interface GameEventDelivery extends GameEvent {
-  from: string;
-}
-
-interface GameParts {
-  runtime: GameRuntime;
-  channel: StateChannel<SlotValue>;
-  events: EventChannel<GameEvent>;
-}
-
 export interface LobbyInfo {
   mode: LobbyMode;
   teamIds: readonly string[];
@@ -112,35 +102,13 @@ interface Parts {
   hostRuntime: GameHostRuntime;
 }
 
+const seatSource = (session: PlayerSession): SeatSource => ({
+  isHost: () => session.isHost(),
+  getLocalPeerId: () => session.getLocalPlayer()?.peerId,
+});
+
 const DEFAULT_LOBBY_INFO: LobbyInfo = { mode: "free-for-all", teamIds: [], allReady: false };
-const NOT_JOINED: CommandResult = { ok: false, kind: "left", reason: "not joined" };
 const EMPTY_CHAT: readonly ChatLine[] = [];
-
-const rosterKey = (p: LobbyPlayer) =>
-  JSON.stringify([
-    p.peerId,
-    p.playerId,
-    p.nickname,
-    p.connectionStatus,
-    p.returning,
-    p.ready,
-    p.teamId,
-  ]);
-
-function sameRoster(a: LobbyPlayer[], b: LobbyPlayer[]): boolean {
-  return (
-    a.length === b.length &&
-    a.every((p, i) => {
-      const other = b[i];
-      return other !== undefined && rosterKey(p) === rosterKey(other);
-    })
-  );
-}
-
-const sameLobbyInfo = (a: LobbyInfo, b: LobbyInfo) =>
-  a.mode === b.mode &&
-  a.allReady === b.allReady &&
-  a.teamIds.join("\u0000") === b.teamIds.join("\u0000");
 
 export class MultiplayerClient {
   private lifecycle: Lifecycle = "idle";
@@ -148,22 +116,32 @@ export class MultiplayerClient {
   private roomId?: string;
   private playerId?: string;
 
-  // Cached derived values (stable references between changes).
-  private status: ClientStatus = "idle";
+  // Derived values (stable references between changes, notified only on real change).
+  private readonly onListenerError = listenerFailure(() => this.deps.logger);
+  private readonly statusStore = new Store<ClientStatus>("idle", Object.is, this.onListenerError);
+  private readonly phaseStore = new Store<RoomPhase | undefined>(
+    undefined,
+    Object.is,
+    this.onListenerError
+  );
+  private readonly playersStore = new Store<LobbyPlayer[]>(
+    [],
+    structurallyEqual,
+    this.onListenerError
+  );
+  private readonly lobbyStore = new Store<LobbyInfo>(
+    DEFAULT_LOBBY_INFO,
+    structurallyEqual,
+    this.onListenerError
+  );
+  private readonly pendingStore = new Store<boolean>(false, Object.is, this.onListenerError);
   private hasSynced = false;
-  private phase?: RoomPhase;
-  private players: LobbyPlayer[] = [];
-  private lobbyInfo: LobbyInfo = DEFAULT_LOBBY_INFO;
-  private pending = false;
 
   private inFlightJoin?: Promise<unknown>;
   private teardownPromise?: Promise<void>;
   private lastSavedNickname?: string;
 
-  private readonly statusEm = new Emitter<ClientStatus>();
-  private readonly phaseEm = new Emitter<RoomPhase | undefined>();
   private readonly hostEm = new Emitter<SignalingPeerId | undefined>();
-  private readonly pendingEm = new Emitter<boolean>();
   private readonly playerIdEm = new Emitter<JoinResult>();
   private readonly supersededEm = new Emitter();
   private readonly kickedEm = new Emitter();
@@ -171,16 +149,13 @@ export class MultiplayerClient {
   private readonly rejoinedEm = new Emitter<LobbyPlayer>();
   private readonly updatedEm = new Emitter<LobbyPlayer>();
   private readonly leftEm = new Emitter<LobbyPlayer>();
-  private readonly playersEm = new Emitter<LobbyPlayer[]>();
-  private readonly lobbyEm = new Emitter<LobbyInfo>();
   private readonly gameEm = new Emitter<ActiveGame | undefined>();
   private readonly chatEm = new Emitter<ChatLine>();
 
   private readonly registry = new Map<string, RegisteredGame>();
   private readonly handles = new Map<string, object>();
-  private readonly slotEms = new Map<string, Emitter>();
-  private readonly eventEms = new Map<string, Emitter<GameEventDelivery>>();
   private readonly roomOptions: RoomStateOptions;
+  private readonly seat: HostSeatKeeper;
 
   constructor(
     options: ClientOptions,
@@ -191,6 +166,7 @@ export class MultiplayerClient {
         throw new Error(`[MultiplayerClient] Duplicate game "${game.id}".`);
       this.registry.set(game.id, game);
     }
+    this.seat = new HostSeatKeeper(deps.stores.hostClaims, deps.pageLifecycle);
     this.roomOptions = {
       validateGame: (id, config, context) => {
         const game = this.registry.get(id);
@@ -221,7 +197,7 @@ export class MultiplayerClient {
   /** Idempotent. Safe to call after a failed join, during a join, or twice. */
   async leave(): Promise<void> {
     await this.inFlightJoin; // let a pending join settle, then tear it down properly
-    if (this.roomId) this.stores.hostClaims.forget(this.roomId); // a deliberate leave never reclaims
+    if (this.roomId) this.seat.forget(this.roomId); // a deliberate leave never reclaims
     await this.teardown();
     this.lifecycle = "idle";
     this.roomId = undefined;
@@ -246,7 +222,7 @@ export class MultiplayerClient {
     try {
       await session.join(options.roomId, buildLocalProfileInput(playerId, nickname), {
         peerId,
-        formerHost: this.stores.hostClaims.recall(options.roomId, playerId),
+        formerHost: this.seat.recall(options.roomId, playerId),
       });
 
       parts = this.assemble(session);
@@ -336,7 +312,7 @@ export class MultiplayerClient {
     const hostRuntime = new GameHostRuntime(games, {
       isHostReady: () => session.isHost() && bus.getStatus() === "ready",
       getRoomState: () => roomState.getState(),
-      getRosterPlayerIds: () => this.players.map((p) => p.playerId),
+      getRosterPlayerIds: () => this.playersStore.get().map((p) => p.playerId),
       logger: logger.child("games"),
     });
 
@@ -385,35 +361,29 @@ export class MultiplayerClient {
     for (const [id, game] of parts.games) {
       parts.cleanups.push(
         game.channel.onChange(() => {
-          this.slotEmitter(id).emit();
+          this.gameBackend.emitSlot(id);
           parts.hostRuntime.reconcile();
         }),
         game.events.onEvent((event, from) =>
-          this.eventEmitter(id).emit({ name: event.name, data: event.data, from })
+          this.gameBackend.emitEvent(id, event.name, event.data, from)
         )
       );
     }
 
     // A refresh fires pagehide (a deliberate leave removes this subscription first). Mark the
     // host claim so the reloaded tab knows its old peer is gone and can take the seat back at once.
-    parts.cleanups.push(
-      this.deps.pageLifecycle.onPageHide(() => {
-        if (session.isHost() && this.roomId) this.stores.hostClaims.markLeaving(this.roomId);
-      })
-    );
+    const roomId = this.roomId;
+    if (roomId) parts.cleanups.push(this.seat.watchPageHide(roomId, seatSource(session)));
   }
 
   // Remember the host seat so a page refresh can take it back. Called from the host-changed
   // handler and right after start.
   private rememberHostSeat(session: PlayerSession, playerId: string): void {
-    const localPeerId = session.getLocalPlayer()?.peerId;
-    if (session.isHost() && localPeerId && this.roomId) {
-      this.stores.hostClaims.remember(this.roomId, playerId, localPeerId);
-    }
+    if (this.roomId) this.seat.remember(this.roomId, playerId, seatSource(session));
   }
 
   private handleSuperseded(): void {
-    if (this.roomId) this.stores.hostClaims.forget(this.roomId);
+    if (this.roomId) this.seat.forget(this.roomId);
     this.lifecycle = "superseded";
     this.supersededEm.emit();
     this.syncDerived();
@@ -421,7 +391,7 @@ export class MultiplayerClient {
   }
 
   private handleKicked(): void {
-    if (this.roomId) this.stores.hostClaims.forget(this.roomId);
+    if (this.roomId) this.seat.forget(this.roomId);
     this.lifecycle = "kicked";
     this.kickedEm.emit();
     this.syncDerived();
@@ -440,9 +410,9 @@ export class MultiplayerClient {
     const parts = this.parts;
     this.parts = undefined;
     this.hasSynced = false;
-    this.players = [];
-    this.lobbyInfo = DEFAULT_LOBBY_INFO;
-    this.pending = false;
+    this.playersStore.reset([]);
+    this.lobbyStore.reset(DEFAULT_LOBBY_INFO);
+    this.pendingStore.reset(false);
     if (!parts) return;
     try {
       this.disposeParts(parts);
@@ -462,12 +432,12 @@ export class MultiplayerClient {
   // ─── Getters (safe in any state) ──────────────────────────────────────────
 
   getStatus(): ClientStatus {
-    return this.status;
+    return this.statusStore.get();
   }
 
   /** Undefined until the room state has synced once. After that it keeps the last known value through a re-sync. */
   getPhase(): RoomPhase | undefined {
-    return this.phase;
+    return this.phaseStore.get();
   }
 
   getRoomId(): string | undefined {
@@ -493,20 +463,20 @@ export class MultiplayerClient {
 
   /** True while a reconnecting guest's ready/team controls are locked. */
   isLocalPending(): boolean {
-    return this.pending;
+    return this.pendingStore.get();
   }
 
   getPlayers(): LobbyPlayer[] {
-    return this.players;
+    return this.playersStore.get();
   }
 
   getLocalPlayer(): LobbyPlayer | undefined {
     const peerId = this.getLocalPeerId();
-    return peerId ? this.players.find((p) => p.peerId === peerId) : undefined;
+    return peerId ? this.playersStore.get().find((p) => p.peerId === peerId) : undefined;
   }
 
   getLobby(): LobbyInfo {
-    return this.lobbyInfo;
+    return this.lobbyStore.get();
   }
 
   getActiveGame(): ActiveGame | undefined {
@@ -531,14 +501,14 @@ export class MultiplayerClient {
     const parts = this.parts;
     return {
       lifecycle: this.lifecycle,
-      status: this.status,
+      status: this.getStatus(),
       hasSynced: this.hasSynced,
-      phase: this.phase,
+      phase: this.getPhase(),
       roomId: this.roomId,
       playerId: this.playerId,
-      pending: this.pending,
-      lobby: this.lobbyInfo,
-      players: this.players.map((p) => ({
+      pending: this.isLocalPending(),
+      lobby: this.getLobby(),
+      players: this.getPlayers().map((p) => ({
         peerId: p.peerId,
         playerId: p.playerId,
         nickname: p.nickname,
@@ -557,11 +527,11 @@ export class MultiplayerClient {
   // ─── Events ───────────────────────────────────────────────────────────────
 
   onStatusChanged(handler: (status: ClientStatus) => void): () => void {
-    return this.statusEm.on(handler);
+    return this.statusStore.subscribe(handler);
   }
 
   onPhaseChanged(handler: (phase: RoomPhase | undefined) => void): () => void {
-    return this.phaseEm.on(handler);
+    return this.phaseStore.subscribe(handler);
   }
 
   onHostChanged(handler: (hostPeerId: SignalingPeerId | undefined) => void): () => void {
@@ -569,7 +539,7 @@ export class MultiplayerClient {
   }
 
   onPendingChanged(handler: (pending: boolean) => void): () => void {
-    return this.pendingEm.on(handler);
+    return this.pendingStore.subscribe(handler);
   }
 
   /** Fires once per successful join, before the status can become "ready". */
@@ -604,12 +574,12 @@ export class MultiplayerClient {
 
   /** Fires only when the roster actually changed (same array reference otherwise). */
   onPlayersChanged(handler: (players: LobbyPlayer[]) => void): () => void {
-    return this.playersEm.on(handler);
+    return this.playersStore.subscribe(handler);
   }
 
   /** Mode, team ids or all-ready changed. */
   onLobbyChanged(handler: (lobby: LobbyInfo) => void): () => void {
-    return this.lobbyEm.on(handler);
+    return this.lobbyStore.subscribe(handler);
   }
 
   /** A game started, ended, or its context changed. */
@@ -684,7 +654,7 @@ export class MultiplayerClient {
 
     if (!parts.session.isHost()) return reject("not-host");
     if (parts.bus.getStatus() !== "ready") return reject("not-ready");
-    if (peerId === this.getLocalPeerId() || !this.players.some((p) => p.peerId === peerId)) {
+    if (peerId === this.getLocalPeerId() || !this.getPlayers().some((p) => p.peerId === peerId)) {
       return reject("unknown-player");
     }
     const result = await parts.session.transferHost(peerId);
@@ -732,7 +702,7 @@ export class MultiplayerClient {
   private freezeContext(lobby: LobbyConfig): GameContext {
     const teams: Record<string, string> = {};
     const participants: string[] = [];
-    for (const p of this.players) {
+    for (const p of this.getPlayers()) {
       participants.push(p.playerId);
       if (lobby.mode === "teams" && p.teamId) teams[p.playerId] = p.teamId;
     }
@@ -751,7 +721,7 @@ export class MultiplayerClient {
       this.gameEm.emit(this.getActiveGame());
     }
 
-    for (const emitter of this.slotEms.values()) emitter.emit(); // isActive may have flipped
+    this.gameBackend.emitAllSlots(); // isActive may have flipped
     this.parts?.hostRuntime.reconcile();
   }
 
@@ -763,9 +733,6 @@ export class MultiplayerClient {
   private refreshPlayers(): void {
     const lobby = this.parts?.lobby;
     const nextPlayers = lobby ? lobby.getPlayers() : [];
-    const playersChanged = !sameRoster(this.players, nextPlayers);
-    if (playersChanged) this.players = nextPlayers;
-
     const config = lobby?.getConfig();
     const nextInfo: LobbyInfo =
       lobby && config
@@ -775,20 +742,18 @@ export class MultiplayerClient {
             allReady: lobby.areAllPlayersReady(),
           }
         : DEFAULT_LOBBY_INFO;
-    const infoChanged = !sameLobbyInfo(this.lobbyInfo, nextInfo);
-    if (infoChanged) this.lobbyInfo = nextInfo;
 
-    if (playersChanged) this.playersEm.emit(this.players);
-    if (infoChanged) this.lobbyEm.emit(this.lobbyInfo);
+    // Both caches first, then notify: a players listener must already see the fresh lobby info.
+    const notifyPlayers = this.playersStore.stage(nextPlayers);
+    const notifyLobby = this.lobbyStore.stage(nextInfo);
+    notifyPlayers?.();
+    notifyLobby?.();
 
-    if (playersChanged) this.parts?.hostRuntime.reconcile(); // late joiners
+    if (notifyPlayers) this.parts?.hostRuntime.reconcile(); // late joiners
   }
 
   private refreshPending(): void {
-    const next = this.parts?.presence.isLocalPending() ?? false;
-    if (next === this.pending) return;
-    this.pending = next;
-    this.pendingEm.emit(next);
+    this.pendingStore.set(this.parts?.presence.isLocalPending() ?? false);
   }
 
   private computeStatus(): ClientStatus {
@@ -812,53 +777,18 @@ export class MultiplayerClient {
 
     const phase = this.hasSynced ? this.parts?.roomState.getState().phase : undefined;
 
-    if (status !== this.status) {
-      this.status = status;
-      this.statusEm.emit(status);
-    }
-    if (phase !== this.phase) {
-      this.phase = phase;
-      this.phaseEm.emit(phase);
-    }
+    this.statusStore.set(status);
+    this.phaseStore.set(phase);
   }
 
-  private slotEmitter(id: string): Emitter {
-    let emitter = this.slotEms.get(id);
-    if (!emitter) this.slotEms.set(id, (emitter = new Emitter()));
-    return emitter;
-  }
-
-  private eventEmitter(id: string): Emitter<GameEventDelivery> {
-    let emitter = this.eventEms.get(id);
-    if (!emitter) this.eventEms.set(id, (emitter = new Emitter<GameEventDelivery>()));
-    return emitter;
-  }
-
-  private readonly gameBackend: GameBackend = {
-    getSlot: (id): Slot | null => {
-      const room = this.parts?.roomState.getState();
-      const slot = this.parts?.games.get(id)?.channel.get() ?? null;
-      const current =
-        !!room &&
-        this.hasSynced &&
-        room.phase === "in-game" &&
-        room.game?.id === id &&
-        slot?.round === room.round;
-      return current ? slot : null;
+  private readonly gameBackend = new ClientGameBackend(
+    {
+      getRoomState: () => this.parts?.roomState.getState(),
+      getGame: (id) => this.parts?.games.get(id),
+      isSynced: () => this.hasSynced,
+      getPlayerId: () => this.playerId,
+      start: (id, config) => this.startGameById(id, config),
     },
-    getLocalPlayerId: () => this.playerId,
-    sendCommand: (id, name, payload) =>
-      this.parts?.games.get(id)?.channel.send(name, payload) ?? Promise.resolve(NOT_JOINED),
-    sendEvent: (id, name, data, toPeerId) => {
-      const game = this.parts?.games.get(id);
-      if (!game || game.runtime.validateEvent(name, data) === undefined) return false;
-      if (toPeerId === undefined) game.events.broadcast({ name, data });
-      else game.events.sendTo(toPeerId, { name, data });
-      return true;
-    },
-    start: (id, config) => this.startGameById(id, config),
-    onSlotChanged: (id, handler) => this.slotEmitter(id).on(handler),
-    onEvent: (id, handler) =>
-      this.eventEmitter(id).on(({ name, data, from }) => handler(name, data, from)),
-  };
+    this.onListenerError
+  );
 }

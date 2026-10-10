@@ -1,20 +1,18 @@
 import type { PlayerPresenceService } from "@/shared/application/presence";
-import { FreeForAllLobbyService } from "./free-for-all-lobby-service";
+import { allReady, normalizeTeam, teamChoiceError } from "./lobby-rules";
 import { LobbyPlayerView } from "./lobby-player-view";
-import { TeamLobbyService } from "./team-lobby-service";
-import type { Lobby, LobbyConfig, LobbyPlayer } from "./types";
+import type { LobbyConfig, LobbyPlayer } from "./types";
 
 type PlayerHandler = (player: LobbyPlayer) => void;
 
-// Replaces LobbyController. It sends and receives nothing: the lobby config is
-// replicated by the room state, and the client calls applyConfig() when it
-// changes. Created once per room and never rebuilt on endGame.
+// The one lobby service. It sends and receives nothing: the lobby config (mode and teams) is
+// replicated by the room state, and the client calls applyConfig() when it changes. Created once
+// per room and never rebuilt on endGame. Rules live in lobby-rules.ts.
 //
-// Player events come straight from the presence-backed view, so they keep
-// working across mode switches. Subscribers never re-subscribe.
+// Player events come straight from the presence-backed view, so they keep working across mode
+// switches. Subscribers never re-subscribe.
 export class LobbyModule {
   private readonly view: LobbyPlayerView;
-  private lobby: Lobby;
   private config: LobbyConfig;
 
   constructor(
@@ -24,7 +22,6 @@ export class LobbyModule {
   ) {
     this.view = new LobbyPlayerView(presence, getRound);
     this.config = config;
-    this.lobby = this.build(config);
   }
 
   getConfig(): LobbyConfig {
@@ -33,70 +30,52 @@ export class LobbyModule {
 
   applyConfig(config: LobbyConfig): void {
     this.config = config;
-    this.lobby = this.build(config);
   }
 
   getPlayers(): LobbyPlayer[] {
-    return this.lobby.getPlayers().map((p) => this.normalize(p));
+    return this.view.getPlayers().map((p) => normalizeTeam(p, this.config));
   }
 
   getLocalPlayer(): LobbyPlayer | undefined {
-    const player = this.lobby.getLocalPlayer();
-    return player ? this.normalize(player) : undefined;
+    const player = this.view.getLocalPlayer();
+    return player ? normalizeTeam(player, this.config) : undefined;
   }
 
   areAllPlayersReady(): boolean {
-    return this.lobby.areAllPlayersReady();
+    return allReady(this.view.getPlayers());
   }
 
   setNickname(nickname: string): void {
-    this.lobby.setNickname(nickname);
+    this.view.setNickname(nickname);
   }
 
   setReady(ready: boolean): void {
-    this.lobby.setReady(ready);
+    this.view.setReady(ready);
   }
 
   chooseTeam(teamId: string): void {
-    const lobby = this.lobby;
-    if (lobby.mode !== "teams") throw new Error("[LobbyModule] The lobby is not in teams mode.");
-    lobby.chooseTeam(teamId);
+    const problem = teamChoiceError(this.config, teamId);
+    if (problem) throw new Error(`[LobbyModule] ${problem}`);
+    this.view.setLocalMetadata({ teamId });
   }
 
   leaveTeam(): void {
-    const lobby = this.lobby;
-    if (lobby.mode === "teams") lobby.leaveTeam();
+    if (this.config.mode === "teams") this.view.setLocalMetadata({ teamId: null });
   }
 
   onPlayerJoined(handler: PlayerHandler): () => void {
-    return this.view.onPlayerJoined((p) => handler(this.normalize(p)));
+    return this.view.onPlayerJoined((p) => handler(normalizeTeam(p, this.config)));
   }
 
   onPlayerRejoined(handler: PlayerHandler): () => void {
-    return this.view.onPlayerRejoined((p) => handler(this.normalize(p)));
+    return this.view.onPlayerRejoined((p) => handler(normalizeTeam(p, this.config)));
   }
 
   onPlayerUpdated(handler: PlayerHandler): () => void {
-    return this.view.onPlayerUpdated((p) => handler(this.normalize(p)));
+    return this.view.onPlayerUpdated((p) => handler(normalizeTeam(p, this.config)));
   }
 
   onPlayerLeft(handler: PlayerHandler): () => void {
-    return this.view.onPlayerLeft((p) => handler(this.normalize(p)));
-  }
-
-  private build(config: LobbyConfig): Lobby {
-    return config.mode === "teams"
-      ? new TeamLobbyService(this.view, config.teamIds)
-      : new FreeForAllLobbyService(this.view);
-  }
-
-  // A teamId that is not valid for the current mode counts as unassigned.
-  private normalize(player: LobbyPlayer): LobbyPlayer {
-    const lobby = this.lobby;
-    const valid =
-      lobby.mode === "teams" &&
-      player.teamId !== undefined &&
-      lobby.getTeams().includes(player.teamId);
-    return { ...player, teamId: valid ? player.teamId : undefined };
+    return this.view.onPlayerLeft((p) => handler(normalizeTeam(p, this.config)));
   }
 }

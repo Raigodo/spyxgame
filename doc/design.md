@@ -18,7 +18,7 @@ kernel: Emitter, Clock (after/every return cancel functions), IdGenerator (ULID)
 
 infrastructure/signaling: ports (RoomMembershipPort, SignalInboxPort, HostElectionPort), Firestore adapters, SignalingSession (join/leave, peer tracking, mailbox, ack tracker), HostElectionService (suspicion, candidate window, turns, claimHost, transferHost). Pure: election-order, peer-diff.
 
-infrastructure/webrtc: ports (RtcConnectionProvider, RtcPeerConnectionPort, RtcDataChannelPort), browser adapters, WebRtcService (role, host changes, reclaim, handoff), RtcPeerRegistry, RtcPeerLinkFactory, RtcLinkNegotiator (one link: offer/answer/ICE), ActiveRtcConnection, RtcReconnectionManager (offer watches, reconnect), ChunkedMessenger. Pure: chunking (split, validate, reassemble), link-policy.
+infrastructure/webrtc: ports (RtcConnectionProvider, RtcPeerConnectionPort, RtcDataChannelPort), browser adapters, WebRtcService (join/leave shell, host-change sequence, handoff), RtcHostRole, HostReclaimController, RtcSignalRouter, RtcPeerRegistry, RtcPeerLinkFactory, RtcLinkNegotiator (one link: offer/answer/ICE), ActiveRtcConnection, RtcReconnectionManager (offer watches, reconnect), ChunkedMessenger. Pure: chunking (split, validate, reassemble), link-policy.
 
 infrastructure/player: PlayerSession (star relay, roster, verified-sender stamping), PlayerDirectory, HostClaimStore (refresh hint), PlayerProfileStore (nickname), envelope-parser, roster-diff.
 
@@ -26,7 +26,9 @@ application/messaging: RoomBus with StateChannel, EventChannel, CommandQueue, wi
 
 application/presence: PlayerReconnectionCoordinator (status, returning-player history, duplicate arbitration, kick, hello), PlayerPresenceService (roster read-model), DepartureGhosts, duplicate-rules.
 
-application/lobby, chat, game (defineGame, GameRuntime, GameHandle, GameHostRuntime), room (RoomStateService, MultiplayerClient facade, createMultiplayerClient composition root).
+application/lobby (one `LobbyModule`, rules in `lobby-rules.ts`), chat, game (defineGame, GameRuntime, GameHandle, GameHostRuntime), room (RoomStateService, MultiplayerClient facade, createMultiplayerClient composition root).
+
+Client helpers: HostSeatKeeper (refresh hint rules), ClientGameBackend (what GameHandle talks to).
 
 presentation: RoomProvider, hooks (one useSyncExternalStore per getter), RoomNavigator, ChatPanel, pages. Pages are the regression boundary.
 
@@ -62,6 +64,7 @@ presentation: RoomProvider, hooks (one useSyncExternalStore per getter), RoomNav
    Decision logic lives in pure functions in their own files; classes stay thin shells.
    Public client API: plain getters, on... callbacks, intent methods returning typed results. A getter has one matching callback that fires only on real change. Intents do not throw for expected failures.
    Names: kebab-case files with role suffix (-port, -adapter, -service, -store), one exported class per file.
+   A derived value the client exposes (status, phase, players, lobby, pending) is a kernel `Store<T>` behind the getter and `on…` pair: notifies only when its equality check says the value changed, and keeps the old reference otherwise. Hooks go through `useClientValue`.
 6. Decision log
    ULID peer ids: the election picks the smallest live peer id, so ids that sort by creation time make the longest-present player win. Clock skew between clients can skew this; accepted.
    One id format everywhere (no UUID generator), so the ordering rule cannot be broken by a stray generator.
@@ -86,6 +89,13 @@ presentation: RoomProvider, hooks (one useSyncExternalStore per getter), RoomNav
    Leaving: `SignalingSession.leaveRoom` runs every remote step best-effort (`bestEffort`: log, never throw). Local cleanup and the membership removal always run, the removal last, and local state is always reset, so a failed leave cannot leave a ghost behind because of an earlier step or block a rejoin. Fire-and-forget promises use `logFailure`; `catch(() => {})` is not used.
    Guards: `isRecord` (plain object, not array) and `isInt` live only in `kernel/guards.ts`; a test fails if another source file defines them. Network validators use them instead of inline `typeof x === "object"` checks, so arrays are never accepted as records.
    Clock everywhere: `PlayerSession` takes the Clock for profile `updatedAt` and for the throttled malformed-envelope warning, so the last `Date.now` exception outside `SystemClock` is gone. The cookie adapter URI-encodes names as well as values; old unencoded profile cookies are orphaned and expire within 24h.
+   Reconnect timer in RtcReconnectionManager.reconnectAsGuest is untracked.
+   WebRtcService split: host role (`RtcHostRole`), reclaim (`HostReclaimController`) and signal dispatch (`RtcSignalRouter`) are separate classes; `WebRtcService` keeps join/leave and the host-change sequence, whose order is load-bearing (reclaim check, clear offer watches, set role, emit, watch for offer). The guest reconnect timer was already tracked (`guestTimers`, cancelled in `stop()`). Behavior is unchanged; `host-reclaim-controller.test.ts` and `rtc-signal-router.test.ts` pin the moved logic.
+   Games: one `{ definition, route }` entry per game (`createGameRegistry`, pure), so a game cannot be registered without a route. A duplicate id or malformed route throws at module load. `RoomNavigator` warns in non-production when the room runs a game this client has no route for, instead of ignoring it silently.
+   Firestore TTL (`expiresAt`) is stamped on new docs only. Docs created before it never expire. A live session older than `roomRetentionMs` (7d) loses its membership/host docs.
+   Firestore retention: new docs carry an `expiresAt` Timestamp stamped from the injected Clock (`expiry.ts`); TTL policies on `rooms`, `signaling-peers`, `messages`, `election-candidates` and `host` delete them lazily. Transient docs (signals, candidates) live 1h, long-lived ones (room, membership, host) 7d, with no heartbeat refresh, so a session older than 7d is the accepted ceiling. A room doc's subcollections are not cascaded, so every collection has its own policy. Saves storage, not reads.
+   Lobby: one `LobbyModule` with the mode as data (`LobbyConfig`) and pure rules in `lobby-rules.ts`; the two per-mode services were removed (80% duplicated, and their team-listing methods were unused). Roster and lobby-info change detection use the kernel `structurallyEqual` over the whole player object including metadata, instead of a hand-listed key, so a new field can never be silently ignored. Cost: a metadata change in any key now fires a roster update.
+   Client split, part 1: `HostSeatKeeper` owns the refresh-hint rules (remember only while host, stamp on pagehide, forget on a deliberate leave), and `ClientGameBackend` is what `GameHandle` talks to, with its own slot/event emitters (now using the scoped listener-error handler). The client reads its live parts through a small deps object. The duplicate `rememberHostSeat` call stays until wiring happens before join (part 2).
 7. Known weak spots
    Failover takes about 5 to 8s (detection, 3s candidate window, 2s per candidate position, link setup, up to 3s recovery). The 3s window doubles as the old host's grace period for reclaim when no pagehide stamp exists (about 2s after detection). `failover-timeline.test.ts` prints the measured fake-time milestones for a dead host and a dead guest; read those before changing any timer.
    Election writes with an unconditional setDoc (last writer wins); only reclaim and handoff use the transaction. A small race remains.
@@ -102,7 +112,7 @@ presentation: RoomProvider, hooks (one useSyncExternalStore per getter), RoomNav
    Test coverage is partial: pure cores, a few classes and a handful of multi-peer smoke scenarios (`room-harness.test.ts`). Refresh, duplicate-tab and election-race scenarios are not written yet.
 8. How to extend
 
-Add a game: write one defineGame definition (id, modes, min/max players, validateConfig, validateState, initialState, commands with pure reduce, optional events and onLateJoin); register it in the presentation games list with its route; add a page using the game handle hooks. Never touch networking.
+Add a game: write one defineGame definition (id, modes, min/max players, validateConfig, validateState, initialState, commands with pure reduce, optional events and onLateJoin); add one `{ definition, route }` entry in `presentation/room/games.ts`; add a page at that route using the game handle hooks. Never touch networking.
 
 Add a port: define the interface next to its layer (ports/), write the browser or Firestore adapter in adapters/, inject it through the owning class's deps object, wire the default in the layer's index.ts factory and the override in createMultiplayerClient, and add a fake for tests.
 
@@ -116,7 +126,7 @@ Add host-only behavior: use hostOnly: true commands; host-side logic must work f
 
 Done: strict TS, Vitest harness (one placeholder test), kernel, ports and adapters, composition root, dependency injection in all layers, pure cores, reclaim fix, ghost rows, cleanup pass, PageLifecycle port.
 
-Next: split big classes one per step, bottom-up: WebRtcService (host role, reclaim controller, signal router; tracked guest reconnect timer), signaling session and election, RoomBus, presence coordinator, MultiplayerClient (subscribe before join). Then conventions doc. Then leftover fixes and public API cleanup (remove unused API, atomic game view, isHost on players; `getGame` rename done). Tests last.
+Next: split big classes one per step, bottom-up: signaling session and election, RoomBus, presence coordinator, MultiplayerClient (subscribe before join). Then conventions doc. Then leftover fixes and public API cleanup (remove unused API, atomic game view, isHost on players; `getGame` rename done). Tests last.
 
 10. Timer inventory
 
@@ -125,8 +135,11 @@ Every timer in `config.ts`: what it protects against, what a wrong firing costs,
 | Timer                         | Default | Protects against                                                                                                                                  | If too short                                                                                                                                              | Shrink?                                                                                                   |
 | ----------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
 | `candidateCollectionWindowMs` | 3s      | Guests noticing a dead host at different moments, so every candidate is in the list before turns are assigned. Also the old host's reclaim grace. | A late detector is missing from the list; two peers may both elect (last writer wins).                                                                    | Done (3s). Going lower shrinks the unstamped reclaim grace; split reclaim from the election window first. |
-| `positionIntervalMs`          | 2s      | Candidate 0 being dead or slow. Position n waits n intervals.                                                                                     | Candidate 1 elects before it sees candidate 0's write. A host-document change cancels pending turns, so only write plus snapshot latency must be covered. | Done (2s)..                                                                                               |
+| `positionIntervalMs`          | 2s      | Candidate 0 being dead or slow. Position n waits n intervals.                                                                                     | Candidate 1 elects before it sees candidate 0's write. A host-document change cancels pending turns, so only write plus snapshot latency must be covered. | Done (2s).                                                                                                |
 | `ackTimeoutMs`                | 15s     | A peer in membership that never reads its signal inbox.                                                                                           | **Destructive**: deletes a slow-but-live peer (throttled background tab).                                                                                 | Not before verify-before-delete exists.                                                                   |
+| `messageRetentionMs`          | 1h      | Signal messages nobody consumed (recipient died) piling up. Firestore TTL, lazy (hours).                                                          | A pending signal is deleted before it is read; the sender's ack timeout already handles that case.                                                        | Leave. Must stay above `ackTimeoutMs` (tested).                                                           |
+| `candidateRetentionMs`        | 1h      | Election candidate docs left behind.                                                                                                              | A candidate disappears mid-election.                                                                                                                      | Leave. Must stay above the election budget (tested).                                                      |
+| `roomRetentionMs`             | 7d      | Abandoned rooms, memberships and host docs piling up.                                                                                             | **Destructive**: a live session longer than this loses its membership or host doc and triggers a re-election.                                             | Leave. Raise it if sessions can run for days.                                                             |
 | `offerTimeoutMs`              | 5s      | A host that never sends an offer.                                                                                                                 | **Destructive**: suspects a live host on slow ICE or slow join.                                                                                           | No. Highest false-positive risk.                                                                          |
 | `reconnectTimeoutMs`          | 5s      | A guest waiting forever for a re-offer after its link died.                                                                                       | Drops the local entry early. Low harm: an arriving offer recreates it.                                                                                    | Yes, but low value.                                                                                       |
 | `reclaimWindowMs`             | 10s     | A refreshed host retrying `claimHost` while its old peer still looks present.                                                                     | The seat goes to someone else. Not harmful, the host just moves.                                                                                          | With the candidate window (they overlap).                                                                 |
@@ -148,6 +161,7 @@ Relations that must hold (checked in `timer-inventory.test.ts`):
 - `commandTtlMs` exceeds the failover budget (candidate window + two position intervals + `recoveryMaxMs`), or commands sent during a failover expire.
 - `duplicateRevealTimeoutMs` exceeds `pingTimeoutMs`.
 - `recoveryMaxMs` is at least `recoveryWindowMs`.
+- `messageRetentionMs` exceeds `ackTimeoutMs`; `candidateRetentionMs` exceeds the election budget; `roomRetentionMs` exceeds a day (TTL deletion lag).
 
 ## 11. Glossary
 

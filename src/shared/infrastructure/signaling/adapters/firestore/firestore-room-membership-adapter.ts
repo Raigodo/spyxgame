@@ -15,12 +15,14 @@ import {
 } from "firebase/firestore";
 import type { Logger, Unsubscribe } from "@/shared/kernel";
 import type { RoomMembershipPort } from "../../ports/room-membership-port";
+import { expiresAt, type Retention } from "./expiry";
 import type { RoomId, SignalingPeer, SignalingPeerId } from "../../types";
 
 export class FirestoreRoomMembershipAdapter implements RoomMembershipPort {
   constructor(
     private readonly client: Firestore,
-    private readonly logger: Logger
+    private readonly logger: Logger,
+    private readonly retention: Retention
   ) {}
 
   private roomRef(roomId: RoomId) {
@@ -36,7 +38,12 @@ export class FirestoreRoomMembershipAdapter implements RoomMembershipPort {
   }
 
   async createRoom(roomId: RoomId): Promise<void> {
-    await setDoc(this.roomRef(roomId), { createdAt: serverTimestamp() }, { merge: false });
+    const { clock, config } = this.retention;
+    await setDoc(
+      this.roomRef(roomId),
+      { createdAt: serverTimestamp(), expiresAt: expiresAt(clock, config.roomRetentionMs) },
+      { merge: false }
+    );
   }
 
   async roomExists(roomId: RoomId): Promise<boolean> {
@@ -44,7 +51,11 @@ export class FirestoreRoomMembershipAdapter implements RoomMembershipPort {
   }
 
   async addPeer(roomId: RoomId, peerId: SignalingPeerId, joinedAt: Date): Promise<void> {
-    await setDoc(this.peerRef(roomId, peerId), { joinedAt });
+    const { clock, config } = this.retention;
+    await setDoc(this.peerRef(roomId, peerId), {
+      joinedAt,
+      expiresAt: expiresAt(clock, config.roomRetentionMs, joinedAt.getTime()),
+    });
   }
 
   async removePeer(roomId: RoomId, peerId: SignalingPeerId): Promise<void> {

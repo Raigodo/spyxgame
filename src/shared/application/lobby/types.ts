@@ -1,13 +1,9 @@
 import type { SignalingPeerId } from "@/shared/infrastructure/signaling";
 import type { RosterPlayer } from "@/shared/application/presence";
-import type { FreeForAllLobbyService } from "./free-for-all-lobby-service";
-import type { TeamLobbyService } from "./team-lobby-service";
 
 export type LobbyMode = "free-for-all" | "teams";
 
 export type LobbyConfig = { mode: "free-for-all" } | { mode: "teams"; teamIds: string[] };
-
-export type Lobby = FreeForAllLobbyService | TeamLobbyService;
 
 // Everything a RosterPlayer already carries (connection status, returning
 // flag, raw metadata), plus the two fields that are actually the lobby's

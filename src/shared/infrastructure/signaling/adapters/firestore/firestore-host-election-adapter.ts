@@ -13,12 +13,18 @@ import {
 import type { HostDocument, HostElectionPort } from "../../ports/host-election-port";
 import type { RoomId, SignalingPeerId } from "../../types";
 import type { Logger, Unsubscribe } from "@/shared/kernel";
+import { expiresAt, type Retention } from "./expiry";
 
 export class FirestoreHostElectionAdapter implements HostElectionPort {
   constructor(
     private readonly client: Firestore,
-    private readonly logger: Logger
+    private readonly logger: Logger,
+    private readonly retention: Retention
   ) {}
+
+  private expiry(ttlMs: number) {
+    return expiresAt(this.retention.clock, ttlMs);
+  }
 
   private hostRef(roomId: RoomId) {
     return doc(this.client, "rooms", roomId, "host", "current");
@@ -38,7 +44,10 @@ export class FirestoreHostElectionAdapter implements HostElectionPort {
   }
 
   async writeHost(roomId: RoomId, peerId: SignalingPeerId): Promise<void> {
-    await setDoc(this.hostRef(roomId), { signalingPeerId: peerId });
+    await setDoc(this.hostRef(roomId), {
+      signalingPeerId: peerId,
+      expiresAt: this.expiry(this.retention.config.roomRetentionMs),
+    });
   }
 
   async clearHost(roomId: RoomId): Promise<void> {
@@ -58,7 +67,10 @@ export class FirestoreHostElectionAdapter implements HostElectionPort {
     peerId: SignalingPeerId,
     deadHostPeerId: SignalingPeerId
   ): Promise<void> {
-    await setDoc(this.candidateRef(roomId, peerId), { deadHostPeerId });
+    await setDoc(this.candidateRef(roomId, peerId), {
+      deadHostPeerId,
+      expiresAt: this.expiry(this.retention.config.candidateRetentionMs),
+    });
   }
 
   async removeCandidate(roomId: RoomId, peerId: SignalingPeerId): Promise<void> {
@@ -88,7 +100,10 @@ export class FirestoreHostElectionAdapter implements HostElectionPort {
     return runTransaction(this.client, async (tx) => {
       const snapshot = await tx.get(this.hostRef(roomId));
       if (!snapshot.exists() || snapshot.data().signalingPeerId !== expectedPeerId) return false;
-      tx.set(this.hostRef(roomId), { signalingPeerId: newPeerId });
+      tx.set(this.hostRef(roomId), {
+        signalingPeerId: newPeerId,
+        expiresAt: this.expiry(this.retention.config.roomRetentionMs),
+      });
       return true;
     });
   }

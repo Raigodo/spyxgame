@@ -13,6 +13,7 @@ import {
 } from "firebase/firestore";
 import type { Logger, Unsubscribe } from "@/shared/kernel";
 import type { SignalInboxPort } from "../../ports/signal-inbox-port";
+import { expiresAt, type Retention } from "./expiry";
 import type { MessageId, RoomId, SignalingMessage, SignalingPeerId } from "../../types";
 
 interface StoredMessage {
@@ -24,7 +25,8 @@ interface StoredMessage {
 export class FirestoreSignalInboxAdapter implements SignalInboxPort {
   constructor(
     private readonly client: Firestore,
-    private readonly logger: Logger
+    private readonly logger: Logger,
+    private readonly retention: Retention
   ) {}
 
   private messagesRef(roomId: RoomId, peerId: SignalingPeerId) {
@@ -39,6 +41,11 @@ export class FirestoreSignalInboxAdapter implements SignalInboxPort {
     await setDoc(this.messageRef(roomId, message.toPeerId, message.id), {
       fromPeerId: message.fromPeerId,
       timestamp: Timestamp.fromDate(message.timestamp),
+      expiresAt: expiresAt(
+        this.retention.clock,
+        this.retention.config.messageRetentionMs,
+        message.timestamp.getTime()
+      ),
       payload: message.payload,
     });
   }

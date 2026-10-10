@@ -167,7 +167,6 @@ export class RtcReconnectionManager {
 
     this.suspectHostDead(signalingPeerId);
 
-    // WebRtcService split.
     const cancel = clock.after(config.reconnectTimeoutMs, () => {
       this.guestTimers.delete(cancel);
       if (isLeaving()) return;

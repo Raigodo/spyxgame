@@ -10,27 +10,40 @@ import type {
   ChatLine,
   ClientStatus,
   LobbyInfo,
+  MultiplayerClient,
   RoomPhase,
 } from "@/shared/application/room";
 import { useRoom } from "./room-context";
 
 const NO_PLAYERS: LobbyPlayer[] = [];
 
-export function useRoomStatus(): ClientStatus {
+/** One client value: `subscribe` is its `on…` callback, `get` its getter, `server` the SSR value. */
+function useClientValue<T>(
+  subscribe: (client: MultiplayerClient, notify: () => void) => () => void,
+  get: (client: MultiplayerClient) => T,
+  server: (client: MultiplayerClient) => T
+): T {
   const { client } = useRoom();
   return useSyncExternalStore(
-    (notify) => client.onStatusChanged(notify),
-    () => client.getStatus(),
+    (notify) => subscribe(client, notify),
+    () => get(client),
+    () => server(client)
+  );
+}
+
+export function useRoomStatus(): ClientStatus {
+  return useClientValue(
+    (c, n) => c.onStatusChanged(n),
+    (c) => c.getStatus(),
     () => "idle" as const
   );
 }
 
 /** Undefined until the room state has synced once. */
 export function usePhase(): RoomPhase | undefined {
-  const { client } = useRoom();
-  return useSyncExternalStore(
-    (notify) => client.onPhaseChanged(notify),
-    () => client.getPhase(),
+  return useClientValue(
+    (c, n) => c.onPhaseChanged(n),
+    (c) => c.getPhase(),
     () => undefined
   );
 }
@@ -48,47 +61,42 @@ export function useIsHost(): boolean {
 }
 
 export function usePending(): boolean {
-  const { client } = useRoom();
-  return useSyncExternalStore(
-    (notify) => client.onPendingChanged(notify),
-    () => client.isLocalPending(),
+  return useClientValue(
+    (c, n) => c.onPendingChanged(n),
+    (c) => c.isLocalPending(),
     () => false
   );
 }
 
 export function usePlayers(): LobbyPlayer[] {
-  const { client } = useRoom();
-  return useSyncExternalStore(
-    (notify) => client.onPlayersChanged(notify),
-    () => client.getPlayers(),
+  return useClientValue(
+    (c, n) => c.onPlayersChanged(n),
+    (c) => c.getPlayers(),
     () => NO_PLAYERS
   );
 }
 
 export function useLobby(): LobbyInfo {
-  const { client } = useRoom();
-  return useSyncExternalStore(
-    (notify) => client.onLobbyChanged(notify),
-    () => client.getLobby(),
-    () => client.getLobby()
+  return useClientValue(
+    (c, n) => c.onLobbyChanged(n),
+    (c) => c.getLobby(),
+    (c) => c.getLobby()
   );
 }
 
 export function useActiveGame(): ActiveGame | undefined {
-  const { client } = useRoom();
-  return useSyncExternalStore(
-    (notify) => client.onGameChanged(notify),
-    () => client.getActiveGame(),
+  return useClientValue(
+    (c, n) => c.onGameChanged(n),
+    (c) => c.getActiveGame(),
     () => undefined
   );
 }
 
 export function useChat(): readonly ChatLine[] {
-  const { client } = useRoom();
-  return useSyncExternalStore(
-    (notify) => client.onChatMessage(notify),
-    () => client.getChat(),
-    () => client.getChat()
+  return useClientValue(
+    (c, n) => c.onChatMessage(n),
+    (c) => c.getChat(),
+    (c) => c.getChat()
   );
 }
 

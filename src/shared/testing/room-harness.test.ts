@@ -58,4 +58,24 @@ describe("room harness smoke scenarios", () => {
     expect(b.client.getStatus()).toBe("ready");
     expect(b.client.getPlayers()).toHaveLength(1);
   });
+
+  it("a guest's team choice reaches the host, and leaving teams mode clears it", async () => {
+    const h = new RoomHarness();
+    const a = h.addClient("a");
+    const b = h.addClient("b");
+    await h.join(a, "room1");
+    await h.join(b, "room1");
+
+    await a.client.switchToTeams(["red", "blue"]);
+    await h.settle();
+    b.client.chooseTeam("red");
+    await h.settle();
+    expect(a.client.getPlayers().filter((p) => p.teamId === "red")).toHaveLength(1);
+    expect(b.client.getLobby()).toMatchObject({ mode: "teams", teamIds: ["red", "blue"] });
+
+    await a.client.switchToFreeForAll();
+    await h.settle();
+    expect(a.client.getPlayers().every((p) => p.teamId === undefined)).toBe(true);
+    expect(a.client.getLobby().mode).toBe("free-for-all");
+  });
 });
