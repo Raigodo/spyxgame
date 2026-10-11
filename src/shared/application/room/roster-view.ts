@@ -2,6 +2,11 @@ import type { GameContext } from "@/shared/application/game";
 import type { LobbyConfig, LobbyMode, LobbyModule, LobbyPlayer } from "@/shared/application/lobby";
 import type { PlayerPresenceService } from "@/shared/application/presence";
 import { Store, structurallyEqual, type Unsubscribe } from "@/shared/kernel";
+import type { SignalingPeerId } from "@/shared/infrastructure/signaling";
+
+export interface RoomPlayer extends LobbyPlayer {
+  isHost: boolean;
+}
 
 export interface LobbyInfo {
   mode: LobbyMode;
@@ -14,17 +19,17 @@ export const DEFAULT_LOBBY_INFO: LobbyInfo = { mode: "free-for-all", teamIds: []
 // The client's cached view of who is in the room: players, lobby info, local pending flag.
 // Each value keeps a stable reference until it really changes.
 export class RosterView {
-  private readonly players: Store<LobbyPlayer[]>;
+  private readonly players: Store<RoomPlayer[]>;
   private readonly lobby: Store<LobbyInfo>;
   private readonly pending: Store<boolean>;
 
   constructor(onListenerError?: (error: unknown) => void) {
-    this.players = new Store<LobbyPlayer[]>([], structurallyEqual, onListenerError);
+    this.players = new Store<RoomPlayer[]>([], structurallyEqual, onListenerError);
     this.lobby = new Store<LobbyInfo>(DEFAULT_LOBBY_INFO, structurallyEqual, onListenerError);
     this.pending = new Store<boolean>(false, Object.is, onListenerError);
   }
 
-  getPlayers(): LobbyPlayer[] {
+  getPlayers(): RoomPlayer[] {
     return this.players.get();
   }
   getLobby(): LobbyInfo {
@@ -34,7 +39,7 @@ export class RosterView {
     return this.pending.get();
   }
 
-  onPlayersChanged(handler: (players: LobbyPlayer[]) => void): Unsubscribe {
+  onPlayersChanged(handler: (players: RoomPlayer[]) => void): Unsubscribe {
     return this.players.subscribe(handler);
   }
   onLobbyChanged(handler: (lobby: LobbyInfo) => void): Unsubscribe {
@@ -45,7 +50,7 @@ export class RosterView {
   }
 
   /** Re-reads the lobby. Both caches update first, then listeners run. Returns whether the roster changed. */
-  refresh(lobby: LobbyModule | undefined): boolean {
+  refresh(lobby: LobbyModule | undefined, hostPeerId?: SignalingPeerId): boolean {
     const config = lobby?.getConfig();
     const nextInfo: LobbyInfo =
       lobby && config
@@ -56,7 +61,10 @@ export class RosterView {
           }
         : DEFAULT_LOBBY_INFO;
 
-    const notifyPlayers = this.players.stage(lobby ? lobby.getPlayers() : []);
+    const players: RoomPlayer[] = lobby
+      ? lobby.getPlayers().map((p) => ({ ...p, isHost: p.peerId === hostPeerId }))
+      : [];
+    const notifyPlayers = this.players.stage(players);
     const notifyLobby = this.lobby.stage(nextInfo);
     notifyPlayers?.();
     notifyLobby?.();

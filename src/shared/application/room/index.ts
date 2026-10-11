@@ -10,3 +10,5 @@ export type { ClientOptions } from "./multiplayer-client";
 export { createMultiplayerClient } from "./create-multiplayer-client";
 export type { MultiplayerClientOverrides } from "./create-multiplayer-client";
 export type { ClientDeps } from "./multiplayer-client";
+
+export type { RoomPlayer } from "./multiplayer-client";

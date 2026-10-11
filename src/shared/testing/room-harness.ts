@@ -35,6 +35,7 @@ export interface HarnessClient {
   readonly pageLifecycle: FakePageLifecycle;
   /** Abrupt death: no leave, no pagehide. Timers stop; Firestore and links go silent. */
   kill(detectionMs?: number): void;
+  silence(): void;
 }
 
 /**
@@ -85,6 +86,7 @@ export class RoomHarness {
         life.kill();
         this.rtc.kill(name, detectionMs);
       },
+      silence: () => this.rtc.silence(name),
     };
   }
 

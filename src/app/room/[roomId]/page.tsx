@@ -9,6 +9,7 @@ import {
   usePending,
   usePhase,
   usePlayers,
+  useRoomStatus,
 } from "@/shared/presentation/room/room-hooks";
 import { useRoom } from "@/shared/presentation/room/room-provider";
 import { demoTap } from "@/demo-tap/demo-tap";
@@ -35,6 +36,7 @@ export default function LobbyPage() {
   const lobby = useLobby();
   const isHost = useIsHost();
   const pending = usePending();
+  const syncing = useRoomStatus() !== "ready";
 
   const [nickname, setNickname] = useState("");
   const [teamIdsInput, setTeamIdsInput] = useState("red,blue");
@@ -106,7 +108,7 @@ export default function LobbyPage() {
             Set
           </button>
           <button
-            disabled={pending}
+            disabled={pending || syncing}
             className={`rounded px-3 py-1 font-semibold disabled:opacity-40 ${local?.ready ? "bg-emerald-700" : "bg-slate-700"}`}
             onClick={() => client.setReady(!local?.ready)}
           >
@@ -122,7 +124,7 @@ export default function LobbyPage() {
             </span>
             <button
               className="disabled:opacity-40 px-3 py-1 border border-slate-700 rounded"
-              disabled={!isHost}
+              disabled={!isHost || syncing}
               onClick={() => void client.switchToFreeForAll().then(report)}
             >
               Free-for-all
@@ -134,7 +136,7 @@ export default function LobbyPage() {
             />
             <button
               className="disabled:opacity-40 px-3 py-1 border border-slate-700 rounded"
-              disabled={!isHost}
+              disabled={!isHost || syncing}
               onClick={() =>
                 void client
                   .switchToTeams(
@@ -155,7 +157,7 @@ export default function LobbyPage() {
               {lobby.teamIds.map((teamId) => (
                 <button
                   key={teamId}
-                  disabled={pending}
+                  disabled={pending || syncing}
                   className={`rounded px-3 py-1 disabled:opacity-40 ${local?.teamId === teamId ? "bg-indigo-700" : "border border-slate-700"}`}
                   onClick={() => chooseTeam(teamId)}
                 >
@@ -163,7 +165,7 @@ export default function LobbyPage() {
                 </button>
               ))}
               <button
-                disabled={pending}
+                disabled={pending || syncing}
                 className="disabled:opacity-40 px-3 py-1 border border-slate-700 rounded"
                 onClick={() => client.leaveTeam()}
               >
@@ -194,9 +196,7 @@ export default function LobbyPage() {
                   <td className="py-1">
                     {p.nickname}
                     {p.peerId === localPeerId && <span className="text-slate-500"> (you)</span>}
-                    {p.peerId === client.getHostPeerId() && (
-                      <span className="text-indigo-400"> (host)</span>
-                    )}
+                    {p.isHost && <span className="text-indigo-400"> (host)</span>}
                   </td>
 
                   <td>{p.ready ? "✓" : "—"}</td>
@@ -212,23 +212,38 @@ export default function LobbyPage() {
                   <td>
                     {isHost && p.peerId !== localPeerId && p.connectionStatus === "active" && (
                       <button
-                        className="px-2 py-0.5 border border-slate-700 rounded text-xs"
+                        disabled={syncing}
+                        className="disabled:opacity-40 px-2 py-0.5 border border-slate-700 rounded text-xs"
                         onClick={() => void client.transferHost(p.peerId).then(report)}
                       >
                         Make host
                       </button>
                     )}
                     {isHost && p.peerId !== localPeerId && (
-                      <button
-                        className="ml-1 px-2 py-0.5 border border-rose-800 rounded text-rose-300 text-xs"
-                        onClick={() => {
-                          if (window.confirm(`Remove ${p.nickname} from the room?`)) {
-                            void client.kickPlayer(p.peerId).then(report);
-                          }
-                        }}
-                      >
-                        Kick
-                      </button>
+                      <>
+                        <button
+                          disabled={syncing}
+                          className="disabled:opacity-40 ml-1 px-2 py-0.5 border border-rose-800 rounded text-rose-300 text-xs"
+                          onClick={() => {
+                            if (window.confirm(`Remove ${p.nickname} from the room?`)) {
+                              void client.kickPlayer(p.peerId).then(report);
+                            }
+                          }}
+                        >
+                          Kick
+                        </button>
+                        <button
+                          disabled={syncing}
+                          className="disabled:opacity-40 ml-1 px-2 py-0.5 border border-rose-800 rounded text-rose-300 text-xs"
+                          onClick={() => {
+                            if (window.confirm(`Ban ${p.nickname} from this room?`)) {
+                              void client.banPlayer(p.peerId).then(report);
+                            }
+                          }}
+                        >
+                          Ban
+                        </button>
+                      </>
                     )}
                   </td>
                 </tr>

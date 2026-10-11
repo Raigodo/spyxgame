@@ -3,38 +3,24 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_CONFIG } from "./config";
 
-const design = readFileSync(
-  fileURLToPath(new URL("../../../doc/design.md", import.meta.url)),
+const timers = readFileSync(
+  fileURLToPath(new URL("../../../docs/timers.md", import.meta.url)),
   "utf8"
 );
-
-// Headings may or may not carry "## " (the doc has been reformatted before), so match the
-// numbered title at the start of a line and end at the next numbered heading.
-function inventorySection(): string {
-  const heading = /^(?:#{1,6}\s+)?10\.\s+Timer inventory\s*$/m.exec(design);
-  if (!heading) return "";
-  const rest = design.slice(heading.index + heading[0].length);
-  const next = /^(?:#{1,6}\s+)?\d+\.\s+\S/m.exec(rest);
-  return next ? rest.slice(0, next.index) : rest;
-}
 
 const timerKeys = Object.values(DEFAULT_CONFIG).flatMap((section) =>
   Object.keys(section).filter((key) => /(Ms|Seconds)$/.test(key))
 );
 
 describe("timer inventory", () => {
-  it("design.md has the inventory section", () => {
-    expect(inventorySection()).not.toBe("");
-  });
-  it("lists every timer in DEFAULT_CONFIG", () => {
-    const section = inventorySection();
-    const missing = timerKeys.filter((key) => !section.includes(`\`${key}\``));
+  it("docs/timers.md has a row for every timer in DEFAULT_CONFIG", () => {
+    const missing = timerKeys.filter((key) => !timers.includes(`| \`${key}\``));
     expect(missing).toEqual([]);
   });
 });
 
 describe("timer relations", () => {
-  const { signaling, bus, presence } = DEFAULT_CONFIG;
+  const { signaling, bus, presence, webrtc } = DEFAULT_CONFIG;
 
   it("commands outlive a failover", () => {
     const failoverBudgetMs =
@@ -58,5 +44,11 @@ describe("timer relations", () => {
   });
   it("room docs outlive Firestore's TTL deletion lag", () => {
     expect(signaling.roomRetentionMs).toBeGreaterThan(24 * 60 * 60 * 1000);
+  });
+  it("the probe waits at least as long between pings as for an answer", () => {
+    expect(webrtc.probeIdleMs).toBeGreaterThanOrEqual(webrtc.probeTimeoutMs);
+  });
+  it("the recovery link grace ends before the recovery cap", () => {
+    expect(bus.recoveryLinkGraceMs).toBeLessThan(bus.recoveryMaxMs);
   });
 });

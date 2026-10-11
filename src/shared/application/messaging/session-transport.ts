@@ -16,5 +16,7 @@ export function createSessionTransport(session: PlayerSession): BusTransport {
       }),
     isLinkActive: (peerId) => session.getPeerConnectionStatus(peerId) === "active",
     getExpectedPeerIds: () => session.getPeerIds(),
+    getLinkedPeerIds: () =>
+      session.getPeerIds().filter((id) => session.getPeerConnectionStatus(id) === "active"),
   };
 }

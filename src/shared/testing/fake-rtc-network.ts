@@ -32,4 +32,11 @@ export class FakeRtcNetwork {
       else this.clock.after(detectionMs, () => remote.lost());
     }
   }
+
+  /** A tab goes silent: links stay open, no data flows. */
+  silence(owner: string): void {
+    for (const connection of this.connections.values()) {
+      if (connection.owner === owner && !connection.isClosed) connection.mute();
+    }
+  }
 }

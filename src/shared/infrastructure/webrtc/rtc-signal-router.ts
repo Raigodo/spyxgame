@@ -25,8 +25,8 @@ export class RtcSignalRouter {
       case "answer":
         await this.handleAnswer(from, signal.sdp);
         break;
-      case "ice-candidate":
-        await this.handleIceCandidate(from, signal.candidate);
+      case "ice-batch":
+        await this.handleIceBatch(from, signal.candidates);
         break;
       default: {
         const unknownSignal: never = signal;
@@ -57,12 +57,12 @@ export class RtcSignalRouter {
     await entry.negotiator.applyAnswer({ type: "answer", sdp });
   }
 
-  private async handleIceCandidate(from: SignalingPeerId, candidate: IceCandidate): Promise<void> {
+  private async handleIceBatch(from: SignalingPeerId, candidates: IceCandidate[]): Promise<void> {
     const entry = this.deps.registry.get(from);
     if (!entry) {
-      this.deps.logger.warn(`ICE candidate from unknown peer=${shortId(from)}, ignoring`);
+      this.deps.logger.warn(`ICE candidates from unknown peer=${shortId(from)}, ignoring`);
       return;
     }
-    await entry.negotiator.applyIceCandidate(candidate);
+    for (const candidate of candidates) await entry.negotiator.applyIceCandidate(candidate);
   }
 }

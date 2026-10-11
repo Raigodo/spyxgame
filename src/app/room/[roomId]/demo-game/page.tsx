@@ -8,6 +8,7 @@ import {
   useGameValue,
   useIsHost,
   usePlayers,
+  useRoomStatus,
 } from "@/shared/presentation/room/room-hooks";
 import { useRoom } from "@/shared/presentation/room/room-provider";
 import { demoTap } from "@/demo-tap/demo-tap";
@@ -26,6 +27,7 @@ export default function DemoGamePage() {
   const game = useGameHandle(demoTap);
   const players = usePlayers();
   const isHost = useIsHost();
+  const syncing = useRoomStatus() !== "ready";
 
   // Each value is a stable reference between changes, so these are plain subscriptions.
   const state = useGameValue(game, () => game.getState());
@@ -86,7 +88,8 @@ export default function DemoGamePage() {
           <div className="flex gap-2">
             {isHost && (
               <button
-                className="bg-amber-700 px-3 py-1 rounded font-semibold"
+                disabled={syncing}
+                className="bg-amber-700 disabled:opacity-40 px-3 py-1 rounded font-semibold"
                 onClick={() => void client.endGame()}
               >
                 End game
@@ -110,7 +113,7 @@ export default function DemoGamePage() {
 
         <section className="flex items-center gap-2">
           <button
-            disabled={role !== "player" || !!state.winner}
+            disabled={role !== "player" || !!state.winner || syncing}
             className="bg-indigo-700 hover:bg-indigo-600 disabled:opacity-40 px-6 py-3 rounded font-semibold text-lg"
             onClick={() => void tap()}
           >
@@ -136,8 +139,9 @@ export default function DemoGamePage() {
               )
               .map((p) => (
                 <button
+                  disabled={syncing}
                   key={p.peerId}
-                  className="px-2 py-0.5 border border-slate-700 rounded"
+                  className="disabled:opacity-40 px-2 py-0.5 border border-slate-700 rounded"
                   onClick={() =>
                     void client
                       .transferHost(p.peerId)

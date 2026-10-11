@@ -75,6 +75,11 @@ export class FakeRtcPeerConnection implements RtcPeerConnectionPort {
     this.channel?.close();
   }
 
+  /** The channel stays open but carries nothing in either direction. */
+  mute(): void {
+    if (this.channel) this.channel.muted = true;
+  }
+
   onIceCandidate(handler: (candidate: IceCandidate) => void): void {
     this.candidateHandler = handler;
   }

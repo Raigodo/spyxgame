@@ -47,6 +47,9 @@ class FakeTransport implements BusTransport {
   getExpectedPeerIds() {
     return this.expected;
   }
+  getLinkedPeerIds() {
+    return this.expected.filter((id) => this.links.has(id));
+  }
   deliver(payload: unknown, from: string) {
     this.messages.emit({ payload, from });
   }

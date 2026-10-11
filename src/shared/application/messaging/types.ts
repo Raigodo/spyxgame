@@ -30,6 +30,8 @@ export interface BusTransport {
   isLinkActive(peerId: PeerId): boolean;
   /** Host side: peers (any link status) the host should hear from after promotion. */
   getExpectedPeerIds(): PeerId[];
+  /** Peers with an active link right now (a subset of the expected ones). */
+  getLinkedPeerIds(): PeerId[];
 }
 
 export interface StateChannelOptions<S> {

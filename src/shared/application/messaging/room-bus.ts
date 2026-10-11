@@ -366,6 +366,8 @@ export class RoomBus {
       clock: this.deps.clock,
       windowMs: this.options.recoveryWindowMs,
       maxMs: this.options.recoveryMaxMs,
+      linkGraceMs: this.options.recoveryLinkGraceMs,
+      getLinkedPeerIds: () => this.transport.getLinkedPeerIds(),
       getExpectedPeerIds: () => this.transport.getExpectedPeerIds(),
       onFinish: (result) => this.finishRecovery(result),
     });

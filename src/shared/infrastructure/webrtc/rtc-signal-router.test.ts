@@ -45,7 +45,7 @@ describe("RtcSignalRouter", () => {
   it("an answer or ICE candidate from an unknown peer is ignored with a warning", async () => {
     const { router, negotiator, logger } = setup();
     await router.handle("p", { type: "answer", sdp: "s" });
-    await router.handle("p", { type: "ice-candidate", candidate: { candidate: "c" } });
+    await router.handle("p", { type: "ice-batch", candidates: [{ candidate: "c" }] });
     expect(negotiator.applyAnswer).not.toHaveBeenCalled();
     expect(negotiator.applyIceCandidate).not.toHaveBeenCalled();
     expect(logger.messages("warn")).toHaveLength(2);
@@ -55,7 +55,7 @@ describe("RtcSignalRouter", () => {
     const { router, registry, negotiator, makeEntry } = setup();
     registry.add("p", makeEntry());
     await router.handle("p", { type: "answer", sdp: "a" });
-    await router.handle("p", { type: "ice-candidate", candidate: { candidate: "c" } });
+    await router.handle("p", { type: "ice-batch", candidates: [{ candidate: "c" }] });
     expect(negotiator.applyAnswer).toHaveBeenCalledWith({ type: "answer", sdp: "a" });
     expect(negotiator.applyIceCandidate).toHaveBeenCalledWith({ candidate: "c" });
   });

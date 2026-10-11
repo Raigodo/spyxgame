@@ -12,10 +12,11 @@ import type {
   LobbyInfo,
   MultiplayerClient,
   RoomPhase,
+  RoomPlayer,
 } from "@/shared/application/room";
 import { useRoom } from "./room-context";
 
-const NO_PLAYERS: LobbyPlayer[] = [];
+const NO_PLAYERS: RoomPlayer[] = [];
 
 /** One client value: `subscribe` is its `on…` callback, `get` its getter, `server` the SSR value. */
 function useClientValue<T>(
@@ -68,7 +69,7 @@ export function usePending(): boolean {
   );
 }
 
-export function usePlayers(): LobbyPlayer[] {
+export function usePlayers(): RoomPlayer[] {
   return useClientValue(
     (c, n) => c.onPlayersChanged(n),
     (c) => c.getPlayers(),

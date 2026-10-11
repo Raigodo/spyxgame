@@ -25,6 +25,7 @@ import {
   type HistoryEntry,
   type HistoryState,
 } from "./presence-history";
+import { addBan, BanState, isBanned, parseBanPayload, parseBans } from "./presence-bans";
 
 export interface PlayerReconnectionCoordinatorDeps {
   session: PlayerSession;
@@ -65,6 +66,7 @@ export class PlayerReconnectionCoordinator {
   private readonly farewell = new Emitter<string>(this.onListenerError);
   private readonly revealed = new Emitter<SignalingPeerId>(this.onListenerError);
   private readonly cleanupFns: Array<() => void> = [];
+  private readonly bans: StateChannel<BanState>;
 
   private readonly channel: EventChannel<PresenceEvent>;
   // Departed players' metadata, replicated by the bus so it survives a host change.
@@ -101,6 +103,17 @@ export class PlayerReconnectionCoordinator {
       authorize: ({ playerId }) => (playerId === undefined ? "unknown-sender" : undefined),
       reduce: (state, entry) => ({ ok: true, state: rememberEntry(state, entry) }),
     });
+    this.bans = bus.stateChannel<BanState>({
+      id: "presence:bans",
+      initial: [],
+      validate: parseBans,
+    });
+    this.bans.handle<{ playerId: string }>("ban", {
+      hostOnly: true,
+      validate: parseBanPayload,
+      reduce: (state, { playerId }) => ({ ok: true, state: addBan(state, playerId) }),
+    });
+
     if (this.wasHost) this.armSelfRestore();
 
     this.view = new DuplicateView({
@@ -147,6 +160,13 @@ export class PlayerReconnectionCoordinator {
 
       session.onPlayerJoined((profile) => {
         if (!session.isHost()) return;
+
+        const joiningId = readPlayerId(profile.metadata);
+        if (joiningId && isBanned(this.bans.get(), joiningId)) {
+          this.expel(profile.peerId, joiningId);
+          return;
+        }
+
         this.arbiter.arbitrateIfDuplicate(profile);
 
         this.book.setStatus(
@@ -189,7 +209,9 @@ export class PlayerReconnectionCoordinator {
       }),
 
       this.channel.onEvent((event, from) => this.handleEvent(event, from)),
-      this.history.onChange(() => this.tryRestoreSelf())
+      this.history.onChange(() => this.tryRestoreSelf()),
+
+      this.bans.onChange(() => this.changed.emit())
     );
 
     // The host's one-time status broadcast can be dropped around a host change; keep asking
@@ -214,6 +236,7 @@ export class PlayerReconnectionCoordinator {
       historyPlayerIds: this.history.get().map((e) => e.playerId), // ids only: no metadata in dumps
       activeDuplicates: this.view.inspect(),
       ...this.arbiter.inspect(),
+      bannedCount: this.bans.get().length,
     };
   }
 
@@ -249,6 +272,11 @@ export class PlayerReconnectionCoordinator {
   // True for the newcomer's peerId while its duplicate is being arbitrated.
   isHiddenDuringArbitration(peerId: SignalingPeerId): boolean {
     return this.view.isHidden(peerId);
+  }
+
+  /** True if this durable id is on the room's ban list (replicated, so every peer can tell). */
+  isPlayerBanned(playerId: string): boolean {
+    return isBanned(this.bans.get(), playerId);
   }
 
   // True while the local (guest) peer is still being acknowledged by the host or is the newcomer
@@ -294,11 +322,30 @@ export class PlayerReconnectionCoordinator {
     if (!this.session.isHost() || peerId === localPeerId) return false;
     const target = this.session.getPlayers().find((p) => p.peerId === peerId);
     if (!target) return false;
-    const playerId = readPlayerId(target.metadata);
-    // Delivered locally too, so the host's own presence service learns it as well.
+    this.expel(peerId, readPlayerId(target.metadata));
+    return true;
+  }
+
+  /** Host only. Adds the player's durable id to the ban list, then kicks them if present. */
+  async ban(peerId: SignalingPeerId): Promise<boolean> {
+    const localPeerId = this.session.getLocalPlayer()?.peerId;
+    if (!this.session.isHost() || peerId === localPeerId) return false;
+    const target = this.session.getPlayers().find((p) => p.peerId === peerId);
+    const playerId = target && readPlayerId(target.metadata);
+    if (!playerId || !(await this.banPlayerId(playerId))) return false;
+    this.kick(peerId);
+    return true;
+  }
+
+  async banPlayerId(playerId: string): Promise<boolean> {
+    if (!this.session.isHost()) return false;
+    return (await this.bans.send("ban", { playerId })).ok;
+  }
+
+  // Tells everyone the player is gone for good (no ghost row), tells the player why, removes them.
+  private expel(peerId: SignalingPeerId, playerId: string | undefined): void {
     if (playerId) this.channel.broadcast({ t: "farewell", playerId });
     this.reject(peerId, "kicked");
-    return true;
   }
 
   // ─── Incoming events ──────────────────────────────────────────────────────

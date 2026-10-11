@@ -14,27 +14,27 @@ describe("parseRtcSignal", () => {
     expect(parseRtcSignal({ type: "offer", sdp: 1 })).toBeUndefined();
     expect(parseRtcSignal({ type: "answer", sdp: "x".repeat(100_001) })).toBeUndefined();
   });
-  it("accepts an ICE candidate and keeps only known fields", () => {
+  it("accepts an ICE batch and keeps only known candidate fields", () => {
     expect(
       parseRtcSignal({
-        type: "ice-candidate",
-        candidate: { candidate: "c", sdpMid: "0", sdpMLineIndex: 0, usernameFragment: null, x: 1 },
+        type: "ice-batch",
+        candidates: [
+          { candidate: "c", sdpMid: "0", sdpMLineIndex: 0, usernameFragment: null, x: 1 },
+        ],
       })
     ).toEqual({
-      type: "ice-candidate",
-      candidate: { candidate: "c", sdpMid: "0", sdpMLineIndex: 0, usernameFragment: null },
+      type: "ice-batch",
+      candidates: [{ candidate: "c", sdpMid: "0", sdpMLineIndex: 0, usernameFragment: null }],
     });
   });
-  it("rejects bad candidate field types and non-objects", () => {
-    expect(
-      parseRtcSignal({ type: "ice-candidate", candidate: { sdpMLineIndex: 1.5 } })
-    ).toBeUndefined();
-    expect(parseRtcSignal({ type: "ice-candidate", candidate: { candidate: 5 } })).toBeUndefined();
-    expect(parseRtcSignal({ type: "ice-candidate", candidate: [] })).toBeUndefined();
-    expect(parseRtcSignal("offer")).toBeUndefined();
-    expect(parseRtcSignal({ type: "nope" })).toBeUndefined();
-    expect(
-      parseRtcSignal({ type: "ice-candidate", candidate: { candidate: null } })
-    ).toBeUndefined();
+  it("rejects empty, oversized or malformed batches", () => {
+    const ice = (candidates: unknown) => parseRtcSignal({ type: "ice-batch", candidates });
+    expect(ice([])).toBeUndefined();
+    expect(ice("x")).toBeUndefined();
+    expect(ice(Array.from({ length: 51 }, () => ({ candidate: "c" })))).toBeUndefined();
+    expect(ice([{ candidate: "c" }, { sdpMLineIndex: 1.5 }])).toBeUndefined();
+    expect(ice([{ candidate: null }])).toBeUndefined();
+    expect(ice([[]])).toBeUndefined();
+    expect(parseRtcSignal({ type: "ice-candidate", candidate: {} })).toBeUndefined();
   });
 });

@@ -46,9 +46,9 @@ import {
 } from "./client-game-backend";
 import { ClientLifecycle, type ClientStatus } from "./client-lifecycle";
 import { HostSeatKeeper, type SeatSource } from "./host-seat-keeper";
-import { RosterView, type LobbyInfo } from "./roster-view";
+import { RoomPlayer, RosterView, type LobbyInfo } from "./roster-view";
 
-export type { ClientStatus, LobbyInfo };
+export type { ClientStatus, LobbyInfo, RoomPlayer };
 
 export interface JoinOptions {
   roomId: string;
@@ -318,6 +318,7 @@ export class MultiplayerClient {
 
       session.onHostChanged((hostPeerId) => {
         if (this.roomId) this.seat.remember(this.roomId, playerId, seatSource(session));
+        this.refreshPlayers();
         this.hostEm.emit(hostPeerId);
         this.lifecycle.sync();
         parts.hostRuntime.reconcile();
@@ -443,11 +444,11 @@ export class MultiplayerClient {
     return this.roster.isPending();
   }
 
-  getPlayers(): LobbyPlayer[] {
+  getPlayers(): RoomPlayer[] {
     return this.roster.getPlayers();
   }
 
-  getLocalPlayer(): LobbyPlayer | undefined {
+  getLocalPlayer(): RoomPlayer | undefined {
     const peerId = this.getLocalPeerId();
     return peerId ? this.getPlayers().find((p) => p.peerId === peerId) : undefined;
   }
@@ -550,7 +551,7 @@ export class MultiplayerClient {
   }
 
   /** Fires only when the roster actually changed (same array reference otherwise). */
-  onPlayersChanged(handler: (players: LobbyPlayer[]) => void): () => void {
+  onPlayersChanged(handler: (players: RoomPlayer[]) => void): () => void {
     return this.roster.onPlayersChanged(handler);
   }
 
@@ -648,6 +649,16 @@ export class MultiplayerClient {
     return parts.presence.kickPlayer(peerId) ? { ok: true } : reject("unknown-player");
   }
 
+  /** Host only. Like kickPlayer, but the player cannot rejoin this room (until it is emptied). */
+  async banPlayer(peerId: SignalingPeerId): Promise<CommandResult> {
+    const parts = this.parts;
+    if (!parts) return NOT_JOINED;
+    const reject = (reason: string): CommandResult => ({ ok: false, kind: "rejected", reason });
+    if (!parts.session.isHost()) return reject("not-host");
+    if (peerId === this.getLocalPeerId()) return reject("cannot-ban-self");
+    return (await parts.presence.banPlayer(peerId)) ? { ok: true } : reject("unknown-player");
+  }
+
   private startGameById(gameId: string, config: unknown): Promise<CommandResult> {
     const parts = this.parts;
     if (!parts) return Promise.resolve(NOT_JOINED);
@@ -702,7 +713,8 @@ export class MultiplayerClient {
   }
 
   private refreshPlayers(): void {
-    if (this.roster.refresh(this.parts?.lobby)) this.parts?.hostRuntime.reconcile(); // late joiners
+    const hostPeerId = this.parts?.session.getHostPeerId();
+    if (this.roster.refresh(this.parts?.lobby, hostPeerId)) this.parts?.hostRuntime.reconcile(); // late joiners
   }
 
   private refreshPending(): void {

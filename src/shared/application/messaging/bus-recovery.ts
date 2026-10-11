@@ -22,6 +22,9 @@ export interface BusRecoveryDeps {
   windowMs: number;
   /** Finish this long after the start, whatever happens. */
   maxMs: number;
+  /** For this long every expected peer is waited for; after it, only peers with an active link. */
+  linkGraceMs: number;
+  getLinkedPeerIds(): readonly PeerId[];
   getExpectedPeerIds(): readonly PeerId[];
   onFinish(result: RecoveryResult): void;
 }
@@ -36,10 +39,16 @@ export class BusRecovery {
   private readonly held: HeldCommand[] = [];
   private cancelSlide?: Cancel;
   private readonly cancelMax: Cancel;
+  private readonly cancelGrace: Cancel;
+  private graceOver = false;
   private done = false;
 
   constructor(private readonly deps: BusRecoveryDeps) {
     this.cancelMax = deps.clock.after(deps.maxMs, () => this.finish());
+    this.cancelGrace = deps.clock.after(deps.linkGraceMs, () => {
+      this.graceOver = true;
+      this.checkComplete(); // nothing else may happen: finish now if everyone linked has offered
+    });
   }
 
   recordOffer(from: PeerId, channels: readonly ChannelCopy[]): void {
@@ -66,7 +75,8 @@ export class BusRecovery {
   /** Finishes now if every expected peer has offered (vacuously true with no peers). */
   checkComplete(): void {
     if (this.done) return;
-    if (isRecoveryComplete(this.deps.getExpectedPeerIds(), this.offeredBy)) this.finish();
+    const expected = this.graceOver ? this.deps.getLinkedPeerIds() : this.deps.getExpectedPeerIds();
+    if (isRecoveryComplete(expected, this.offeredBy)) this.finish();
   }
 
   /** Abandons the recovery without finishing (demotion, dispose). */
@@ -75,6 +85,7 @@ export class BusRecovery {
     this.cancelSlide?.();
     this.cancelSlide = undefined;
     this.cancelMax();
+    this.cancelGrace();
   }
 
   inspect(): Record<string, unknown> {

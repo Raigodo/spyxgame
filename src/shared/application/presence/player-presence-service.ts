@@ -104,6 +104,17 @@ export class PlayerPresenceService {
     this.reconnection.dispose();
   }
 
+  /** Host only. Bans the player's durable id and removes them (a departed "reconnecting" row too). */
+  async banPlayer(peerId: SignalingPeerId): Promise<boolean> {
+    const ghostPlayerId = this.ghosts.findPlayerIdByPeer(peerId);
+    if (ghostPlayerId !== undefined) {
+      const ok = await this.reconnection.banPlayerId(ghostPlayerId);
+      if (ok) this.kickPlayer(peerId);
+      return ok;
+    }
+    return this.reconnection.ban(peerId);
+  }
+
   getLocalPlayer(): RosterPlayer | undefined {
     const profile = this.session.getLocalPlayer();
     return profile ? this.toRosterPlayer(profile) : undefined;
@@ -189,6 +200,8 @@ export class PlayerPresenceService {
   private isVisible(profile: PlayerProfile): boolean {
     if (profile.peerId === this.session.getLocalPlayer()?.peerId) return true;
     if (this.reconnection.isHiddenDuringArbitration(profile.peerId)) return false;
+    const bannedId = readPlayerId(profile.metadata);
+    if (bannedId !== undefined && this.reconnection.isPlayerBanned(bannedId)) return false;
     const own = this.localPlayerId();
     return own === undefined || readPlayerId(profile.metadata) !== own;
   }
@@ -202,6 +215,11 @@ export class PlayerPresenceService {
   // keep a "reconnecting" row for the grace period instead of dropping them.
   private handleDeparture(profile: PlayerProfile): void {
     const playerId = readPlayerId(profile.metadata);
+    if (playerId !== undefined && this.reconnection.isPlayerBanned(playerId)) {
+      this.ghosts.takeRemoval(playerId); // a banned player never lingers as a ghost
+      this.emit(this.left, profile);
+      return;
+    }
     if (playerId === undefined || !this.shouldShowAsReconnecting(playerId)) {
       this.emit(this.left, profile);
       return;

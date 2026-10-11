@@ -14,14 +14,16 @@ const command = {
   payload: 0,
 };
 
-function setup(expected: string[]) {
+function setup(expected: string[], linked: string[] = expected) {
   const clock = new FakeClock();
   const onFinish = vi.fn<(r: RecoveryResult) => void>();
   const recovery = new BusRecovery({
     clock,
     windowMs: 3_000,
     maxMs: 10_000,
+    linkGraceMs: 2_000,
     getExpectedPeerIds: () => expected,
+    getLinkedPeerIds: () => linked,
     onFinish,
   });
   return { clock, recovery, onFinish };
@@ -82,5 +84,20 @@ describe("BusRecovery", () => {
     recovery.recordOffer("a", [copy(1)]);
     clock.advance(20_000);
     expect(onFinish).not.toHaveBeenCalled();
+  });
+
+  it("after the link grace, a peer that never got a link is no longer waited for", () => {
+    const { clock, recovery, onFinish } = setup(["a", "dead"], ["a"]);
+    recovery.recordOffer("a", [copy(1)]);
+    clock.advance(1_999);
+    expect(onFinish).not.toHaveBeenCalled(); // "dead" may still be linking
+    clock.advance(1);
+    expect(onFinish).toHaveBeenCalledTimes(1);
+  });
+
+  it("with no link at all, the grace end finishes it too", () => {
+    const { clock, onFinish } = setup(["dead"], []);
+    clock.advance(2_000);
+    expect(onFinish).toHaveBeenCalledTimes(1);
   });
 });

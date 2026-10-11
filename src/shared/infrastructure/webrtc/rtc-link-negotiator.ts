@@ -1,4 +1,4 @@
-import { shortId, type IdGenerator, type Logger } from "@/shared/kernel";
+import { type IdGenerator, type Logger } from "@/shared/kernel";
 import { ActiveRtcConnection } from "./active-rtc-connection";
 import type { RtcDataChannelPort } from "./ports/rtc-data-channel-port";
 import type {

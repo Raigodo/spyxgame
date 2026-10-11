@@ -7,6 +7,7 @@ import type {
 export class FakeRtcDataChannel implements RtcDataChannelPort {
   readyState: DataChannelState = "connecting";
   peer?: FakeRtcDataChannel;
+  muted = false;
   private openHandler?: () => void;
   private messageHandler?: (data: string) => void;
   private closeHandler?: () => void;
@@ -15,6 +16,7 @@ export class FakeRtcDataChannel implements RtcDataChannelPort {
     if (this.readyState !== "open") {
       throw new Error(`[FakeRtcDataChannel] Cannot send: ${this.readyState}`);
     }
+    if (this.muted) return;
     const peer = this.peer;
     queueMicrotask(() => peer?.receive(data));
   }
@@ -61,6 +63,6 @@ export class FakeRtcDataChannel implements RtcDataChannelPort {
   onError(): void {}
 
   private receive(data: string): void {
-    if (this.readyState === "open") this.messageHandler?.(data);
+    if (this.readyState === "open" && !this.muted) this.messageHandler?.(data);
   }
 }

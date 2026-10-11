@@ -127,3 +127,26 @@ describe("history survives host changes", () => {
     expect(row?.returning).toBe(true);
   });
 });
+
+describe("ban", () => {
+  it("a banned player is kicked and cannot rejoin with the same playerId", async () => {
+    const h = new RoomHarness();
+    const a = h.addClient("a");
+    const b = h.addClient("b");
+    await h.join(a, ROOM);
+    const { playerId } = await h.join(b, ROOM);
+
+    await expect(a.client.banPlayer(b.client.getLocalPeerId() ?? "")).resolves.toEqual({
+      ok: true,
+    });
+    await h.advance(1_000);
+    expect(b.client.getStatus()).toBe("kicked");
+
+    const b2 = h.addClient("b2");
+    await h.join(b2, ROOM, playerId);
+    expect(a.client.getPlayers().some((p) => p.peerId === b2.client.getLocalPeerId())).toBe(false);
+    await h.advance(3_000);
+    expect(b2.client.getStatus()).toBe("kicked");
+    expect(a.client.getPlayers()).toHaveLength(1);
+  });
+});

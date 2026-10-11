@@ -62,6 +62,8 @@ export class WebRtcService {
       registry: this.registry,
       connections,
       ids,
+      clock,
+      config,
       logger: logger.child("link"),
       onMessage: (message, from) => this.messageReceived.emit({ message, from }),
       onConnectionDied: (signalingPeerId) => {
@@ -381,8 +383,6 @@ export class WebRtcService {
       this.peerLeft.emit({ signalingPeerId });
       return;
     }
-    // Remove first: closing the link below fires "connection died", which must find nothing to reconnect.
-    this.registry.remove(signalingPeerId);
-    this.registry.disposeEntry(entry);
+    this.registry.remove(signalingPeerId); // also closes the link, in the safe order
   }
 }

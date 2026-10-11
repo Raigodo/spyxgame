@@ -61,4 +61,13 @@ describe("RosterView", () => {
     });
     expect(view.freezeContext({ mode: "free-for-all" }).teams).toEqual({});
   });
+
+  it("marks the host row, and a host change alone updates the roster", () => {
+    const view = new RosterView();
+    const lobby = fakeLobby([player("a"), player("b")]);
+    view.refresh(lobby, "a");
+    expect(view.getPlayers().map((p) => p.isHost)).toEqual([true, false]);
+    expect(view.refresh(lobby, "b")).toBe(true);
+    expect(view.getPlayers().map((p) => p.isHost)).toEqual([false, true]);
+  });
 });

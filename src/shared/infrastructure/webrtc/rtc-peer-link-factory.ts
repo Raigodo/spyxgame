@@ -1,16 +1,20 @@
-import { shortId, type IdGenerator, type Logger } from "@/shared/kernel";
+import { Clock, shortId, WebRtcConfig, type IdGenerator, type Logger } from "@/shared/kernel";
 import type { SignalingPeerId, SignalingSession } from "../signaling";
 import type { RtcConnectionProvider } from "./ports/rtc-connection-provider";
 import { RtcLinkNegotiator } from "./rtc-link-negotiator";
 import type { RtcPeerRegistry } from "./rtc-peer-registry";
 import type { PeerEntry } from "./types";
 import { RtcSignal } from "./rtc-signal";
+import { IceBatcher } from "./ice-batcher";
+import { classifyProbe, LinkProbe, PROBE_PONG } from "./link-probe";
 
 export interface RtcPeerLinkFactoryDeps {
   signaling: SignalingSession;
   registry: RtcPeerRegistry;
   connections: RtcConnectionProvider;
   ids: IdGenerator;
+  clock: Clock;
+  config: WebRtcConfig;
   logger: Logger;
   onMessage: (message: string, from: SignalingPeerId) => void;
   onConnectionDied: (signalingPeerId: SignalingPeerId) => void;
@@ -33,16 +37,27 @@ export class RtcPeerLinkFactory {
     });
     const entry: PeerEntry = { negotiator, connection: null, status: "connecting" };
 
+    // Candidates leave in batches. A batch for a link that was replaced or removed, or sent
+    // while leaving, is dropped.
+    const batcher = new IceBatcher({
+      clock: this.deps.clock,
+      windowMs: this.deps.config.iceBatchWindowMs,
+      maxBatch: this.deps.config.iceMaxBatch,
+      send: (candidates) => {
+        if (isLeaving() || registry.get(signalingPeerId) !== entry) return;
+        logger.debug(`ICE batch of ${candidates.length} for peer=${peer}`);
+        void signaling
+          .sendSignal(
+            signalingPeerId,
+            { type: "ice-batch", candidates } satisfies RtcSignal,
+            isHost() ? "remove" : "do-nothing"
+          )
+          .catch(this.logSendFailure("ICE batch", signalingPeerId));
+      },
+    });
+
     negotiator.onIceCandidateCreated((candidate) => {
-      if (isLeaving()) return;
-      logger.debug(`ICE candidate for peer=${peer}`);
-      void signaling
-        .sendSignal(
-          signalingPeerId,
-          { type: "ice-candidate", candidate } satisfies RtcSignal,
-          isHost() ? "remove" : "do-nothing"
-        )
-        .catch(this.logSendFailure("ICE candidate", signalingPeerId));
+      if (!isLeaving()) batcher.add(candidate);
     });
 
     negotiator.onAnswerCreated((answer) => {
@@ -62,14 +77,48 @@ export class RtcPeerLinkFactory {
       logger.debug(`Connected to peer=${peer}`);
 
       entry.connection = connection;
+      batcher.cancel(); // the channel is open: connectivity is established, pending candidates are moot
       registry.setStatus(signalingPeerId, "active");
 
-      connection.onMessage((message) => this.deps.onMessage(message, signalingPeerId));
+      let declaredDead = false;
+      const probe = new LinkProbe({
+        clock: this.deps.clock,
+        config: this.deps.config,
+        logger: logger.child("probe"),
+        isActive: () => isHost(),
+        send: (text) => {
+          try {
+            connection.send(text);
+          } catch {
+            // the link is going away; the state handler deals with it
+          }
+        },
+        onDead: () => {
+          declaredDead = true; // closing the link below fires a state change we must not repeat
+          logger.warn(`Link to peer=${peer} is silent, treating it as dead`);
+          this.deps.onConnectionDied(signalingPeerId);
+        },
+      });
+
+      connection.onMessage((message) => {
+        probe.noteInbound();
+        const control = classifyProbe(message);
+        if (control === "ping") {
+          try {
+            connection.send(PROBE_PONG);
+          } catch {
+            // see above
+          }
+        }
+        if (control) return;
+        this.deps.onMessage(message, signalingPeerId);
+      });
 
       connection.onStateChange((state) => {
         logger.debug(`Connection state changed peer=${peer} state=${state}`);
         if (state === "disconnected" || state === "failed") {
-          this.deps.onConnectionDied(signalingPeerId);
+          probe.stop();
+          if (!declaredDead) this.deps.onConnectionDied(signalingPeerId);
         }
       });
     });

@@ -26,11 +26,19 @@ export interface AppConfig {
     maxChunkSize: number;
     maxChunksPerMessage: number;
     chunkBufferTtlMs: number;
+    /** ICE candidates of one link are sent together after this long (one signal doc, not many). */
+    iceBatchWindowMs: number;
+    iceMaxBatch: number;
+    /** The host pings a link with no inbound traffic this long; no answer within the timeout means dead. */
+    probeIdleMs: number;
+    probeTimeoutMs: number;
   };
   bus: {
     commandTtlMs: number;
     recoveryWindowMs: number;
     recoveryMaxMs: number;
+    /** After promotion, peers still linking are waited for this long; later only active links count. */
+    recoveryLinkGraceMs: number;
     resyncIntervalMs: number;
   };
   presence: {
@@ -74,6 +82,10 @@ export const DEFAULT_CONFIG: AppConfig = {
     offerTimeoutMs: 5_000,
     reconnectTimeoutMs: 5_000,
     reclaimWindowMs: 10_000,
+    iceBatchWindowMs: 300,
+    iceMaxBatch: 20,
+    probeIdleMs: 10_000,
+    probeTimeoutMs: 5_000,
     maxChunkSize: 12_000,
     maxChunksPerMessage: 256,
     chunkBufferTtlMs: 30_000,
@@ -82,6 +94,7 @@ export const DEFAULT_CONFIG: AppConfig = {
     commandTtlMs: 30_000,
     recoveryWindowMs: 3_000,
     recoveryMaxMs: 10_000,
+    recoveryLinkGraceMs: 2_000,
     resyncIntervalMs: 3_000,
   },
   presence: {

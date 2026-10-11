@@ -176,7 +176,6 @@ export class RtcReconnectionManager {
 
       this.log.warn(`No offer received from peer=${shortId(signalingPeerId)}, removing entry`);
       if (signalingPeerId === getHostPeerId()) {
-        registry.disposeEntry(current);
         registry.remove(signalingPeerId);
       } else {
         registry.discard(signalingPeerId); // the host moved on: silent, the peer is still in the room
