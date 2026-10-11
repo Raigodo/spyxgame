@@ -10,7 +10,6 @@ import { ChatSendResult, ChatService, type ChatLine } from "@/shared/application
 import {
   buildLocalProfileInput,
   LobbyModule,
-  type LobbyConfig,
   type LobbyMode,
   type LobbyPlayer,
 } from "@/shared/application/lobby";
@@ -25,8 +24,6 @@ import {
   isRecord,
   listenerFailure,
   logFailure,
-  Store,
-  structurallyEqual,
   type AppConfig,
   type Clock,
   type IdGenerator,
@@ -47,9 +44,11 @@ import {
   type GameEvent,
   type GameParts,
 } from "./client-game-backend";
+import { ClientLifecycle, type ClientStatus } from "./client-lifecycle";
 import { HostSeatKeeper, type SeatSource } from "./host-seat-keeper";
+import { RosterView, type LobbyInfo } from "./roster-view";
 
-export type ClientStatus = "idle" | "joining" | "syncing" | "ready" | "superseded" | "kicked";
+export type { ClientStatus, LobbyInfo };
 
 export interface JoinOptions {
   roomId: string;
@@ -82,14 +81,6 @@ export interface ClientDeps {
   pageLifecycle: PageLifecycle;
 }
 
-export interface LobbyInfo {
-  mode: LobbyMode;
-  teamIds: readonly string[];
-  allReady: boolean;
-}
-
-type Lifecycle = "idle" | "joining" | "joined" | "superseded" | "kicked";
-
 interface Parts {
   session: PlayerSession;
   presence: PlayerPresenceService;
@@ -102,55 +93,40 @@ interface Parts {
   hostRuntime: GameHostRuntime;
 }
 
+const EMPTY_CHAT: readonly ChatLine[] = [];
+
 const seatSource = (session: PlayerSession): SeatSource => ({
   isHost: () => session.isHost(),
   getLocalPeerId: () => session.getLocalPlayer()?.peerId,
 });
 
-const DEFAULT_LOBBY_INFO: LobbyInfo = { mode: "free-for-all", teamIds: [], allReady: false };
-const EMPTY_CHAT: readonly ChatLine[] = [];
-
 export class MultiplayerClient {
-  private lifecycle: Lifecycle = "idle";
   private parts?: Parts;
   private roomId?: string;
   private playerId?: string;
 
-  // Derived values (stable references between changes, notified only on real change).
   private readonly onListenerError = listenerFailure(() => this.deps.logger);
-  private readonly statusStore = new Store<ClientStatus>("idle", Object.is, this.onListenerError);
-  private readonly phaseStore = new Store<RoomPhase | undefined>(
-    undefined,
-    Object.is,
-    this.onListenerError
-  );
-  private readonly playersStore = new Store<LobbyPlayer[]>(
-    [],
-    structurallyEqual,
-    this.onListenerError
-  );
-  private readonly lobbyStore = new Store<LobbyInfo>(
-    DEFAULT_LOBBY_INFO,
-    structurallyEqual,
-    this.onListenerError
-  );
-  private readonly pendingStore = new Store<boolean>(false, Object.is, this.onListenerError);
-  private hasSynced = false;
+  private readonly roster = new RosterView(this.onListenerError);
+  private readonly lifecycle = new ClientLifecycle({
+    getBusStatus: () => this.parts?.bus.getStatus(),
+    getRoomPhase: () => this.parts?.roomState.getState().phase,
+    onListenerError: this.onListenerError,
+  });
 
   private inFlightJoin?: Promise<unknown>;
   private teardownPromise?: Promise<void>;
   private lastSavedNickname?: string;
 
-  private readonly hostEm = new Emitter<SignalingPeerId | undefined>();
-  private readonly playerIdEm = new Emitter<JoinResult>();
-  private readonly supersededEm = new Emitter();
-  private readonly kickedEm = new Emitter();
-  private readonly joinedEm = new Emitter<LobbyPlayer>();
-  private readonly rejoinedEm = new Emitter<LobbyPlayer>();
-  private readonly updatedEm = new Emitter<LobbyPlayer>();
-  private readonly leftEm = new Emitter<LobbyPlayer>();
-  private readonly gameEm = new Emitter<ActiveGame | undefined>();
-  private readonly chatEm = new Emitter<ChatLine>();
+  private readonly hostEm = new Emitter<SignalingPeerId | undefined>(this.onListenerError);
+  private readonly playerIdEm = new Emitter<JoinResult>(this.onListenerError);
+  private readonly supersededEm = new Emitter(this.onListenerError);
+  private readonly kickedEm = new Emitter(this.onListenerError);
+  private readonly joinedEm = new Emitter<LobbyPlayer>(this.onListenerError);
+  private readonly rejoinedEm = new Emitter<LobbyPlayer>(this.onListenerError);
+  private readonly updatedEm = new Emitter<LobbyPlayer>(this.onListenerError);
+  private readonly leftEm = new Emitter<LobbyPlayer>(this.onListenerError);
+  private readonly gameEm = new Emitter<ActiveGame | undefined>(this.onListenerError);
+  private readonly chatEm = new Emitter<ChatLine>(this.onListenerError);
 
   private readonly registry = new Map<string, RegisteredGame>();
   private readonly handles = new Map<string, object>();
@@ -184,9 +160,9 @@ export class MultiplayerClient {
   // ─── Lifecycle ────────────────────────────────────────────────────────────
 
   async join(options: JoinOptions): Promise<JoinResult> {
-    if (this.lifecycle !== "idle") {
+    if (this.lifecycle.get() !== "idle") {
       throw new Error(
-        `[MultiplayerClient] Cannot join while ${this.lifecycle}. Call leave() first.`
+        `[MultiplayerClient] Cannot join while ${this.lifecycle.get()}. Call leave() first.`
       );
     }
     const attempt = this.performJoin(options); // sets lifecycle synchronously
@@ -199,15 +175,15 @@ export class MultiplayerClient {
     await this.inFlightJoin; // let a pending join settle, then tear it down properly
     if (this.roomId) this.seat.forget(this.roomId); // a deliberate leave never reclaims
     await this.teardown();
-    this.lifecycle = "idle";
+    this.lifecycle.set("idle");
     this.roomId = undefined;
-    this.syncDerived();
+    this.lifecycle.sync();
   }
 
   private async performJoin(options: JoinOptions): Promise<JoinResult> {
-    this.lifecycle = "joining";
+    this.lifecycle.set("joining");
     this.roomId = options.roomId;
-    this.syncDerived();
+    this.lifecycle.sync();
 
     const suppliedId = options.playerId?.trim();
     const playerId = suppliedId || this.deps.ids.next();
@@ -218,6 +194,16 @@ export class MultiplayerClient {
     // A fresh peerId per join, minted here so loggers can be scoped to it. Never reused.
     const peerId = this.deps.ids.next();
     const session = this.deps.createSession(peerId);
+
+    // A room creator's host event fires during join(), before wire() subscribes, and the local
+    // profile does not exist yet, so this watcher uses the peerId minted above.
+    const offSeatWatch = session.onHostChanged(() =>
+      this.seat.remember(options.roomId, playerId, {
+        isHost: () => session.isHost(),
+        getLocalPeerId: () => peerId,
+      })
+    );
+
     let parts: Parts | undefined;
     try {
       await session.join(options.roomId, buildLocalProfileInput(playerId, nickname), {
@@ -229,24 +215,23 @@ export class MultiplayerClient {
       this.parts = parts; // before start(): handlers fired by start() already see it
       this.wire(parts, playerId, nickname);
       parts.bus.start();
-      // A room creator's host event fires during join(), before wire() subscribed, so remember
-      // the seat here as well as in the host-changed handler.
-      this.rememberHostSeat(session, playerId);
+      offSeatWatch(); // wire() now covers every later host change
     } catch (error) {
+      offSeatWatch();
       this.parts = undefined;
       if (parts) this.disposeParts(parts);
       await session.leave().catch(logFailure(this.deps.logger, "leave after failed join"));
-      this.lifecycle = "idle";
-      this.syncDerived();
+      this.lifecycle.set("idle");
+      this.lifecycle.sync();
       throw error;
     }
 
     this.playerId = playerId;
-    this.lifecycle = "joined";
+    this.lifecycle.set("joined");
     this.refreshPlayers();
     this.refreshPending();
     this.playerIdEm.emit(result); // before callers can see status "ready"
-    this.syncDerived();
+    this.lifecycle.sync();
     return result;
   }
 
@@ -312,7 +297,7 @@ export class MultiplayerClient {
     const hostRuntime = new GameHostRuntime(games, {
       isHostReady: () => session.isHost() && bus.getStatus() === "ready",
       getRoomState: () => roomState.getState(),
-      getRosterPlayerIds: () => this.playersStore.get().map((p) => p.playerId),
+      getRosterPlayerIds: () => this.roster.getPlayers().map((p) => p.playerId),
       logger: logger.child("games"),
     });
 
@@ -326,15 +311,15 @@ export class MultiplayerClient {
 
     parts.cleanups.push(
       bus.onStatusChanged(() => {
-        this.syncDerived();
+        this.lifecycle.sync();
         parts.hostRuntime.reconcile();
       }),
       roomState.onChange((next, prev) => this.handleRoomStateChanged(next, prev)),
 
       session.onHostChanged((hostPeerId) => {
-        this.rememberHostSeat(session, playerId);
+        if (this.roomId) this.seat.remember(this.roomId, playerId, seatSource(session));
         this.hostEm.emit(hostPeerId);
-        this.syncDerived();
+        this.lifecycle.sync();
         parts.hostRuntime.reconcile();
       }),
 
@@ -376,26 +361,20 @@ export class MultiplayerClient {
     if (roomId) parts.cleanups.push(this.seat.watchPageHide(roomId, seatSource(session)));
   }
 
-  // Remember the host seat so a page refresh can take it back. Called from the host-changed
-  // handler and right after start.
-  private rememberHostSeat(session: PlayerSession, playerId: string): void {
-    if (this.roomId) this.seat.remember(this.roomId, playerId, seatSource(session));
-  }
-
   private handleSuperseded(): void {
     if (this.roomId) this.seat.forget(this.roomId);
-    this.lifecycle = "superseded";
+    this.lifecycle.set("superseded");
     this.supersededEm.emit();
-    this.syncDerived();
-    void this.teardown().then(() => this.syncDerived());
+    this.lifecycle.sync();
+    void this.teardown().then(() => this.lifecycle.sync());
   }
 
   private handleKicked(): void {
     if (this.roomId) this.seat.forget(this.roomId);
-    this.lifecycle = "kicked";
+    this.lifecycle.set("kicked");
     this.kickedEm.emit();
-    this.syncDerived();
-    void this.teardown().then(() => this.syncDerived());
+    this.lifecycle.sync();
+    void this.teardown().then(() => this.lifecycle.sync());
   }
 
   private teardown(): Promise<void> {
@@ -409,10 +388,8 @@ export class MultiplayerClient {
   private async doTeardown(): Promise<void> {
     const parts = this.parts;
     this.parts = undefined;
-    this.hasSynced = false;
-    this.playersStore.reset([]);
-    this.lobbyStore.reset(DEFAULT_LOBBY_INFO);
-    this.pendingStore.reset(false);
+    this.lifecycle.resetSynced();
+    this.roster.reset();
     if (!parts) return;
     try {
       this.disposeParts(parts);
@@ -432,12 +409,12 @@ export class MultiplayerClient {
   // ─── Getters (safe in any state) ──────────────────────────────────────────
 
   getStatus(): ClientStatus {
-    return this.statusStore.get();
+    return this.lifecycle.getStatus();
   }
 
   /** Undefined until the room state has synced once. After that it keeps the last known value through a re-sync. */
   getPhase(): RoomPhase | undefined {
-    return this.phaseStore.get();
+    return this.lifecycle.getPhase();
   }
 
   getRoomId(): string | undefined {
@@ -463,24 +440,24 @@ export class MultiplayerClient {
 
   /** True while a reconnecting guest's ready/team controls are locked. */
   isLocalPending(): boolean {
-    return this.pendingStore.get();
+    return this.roster.isPending();
   }
 
   getPlayers(): LobbyPlayer[] {
-    return this.playersStore.get();
+    return this.roster.getPlayers();
   }
 
   getLocalPlayer(): LobbyPlayer | undefined {
     const peerId = this.getLocalPeerId();
-    return peerId ? this.playersStore.get().find((p) => p.peerId === peerId) : undefined;
+    return peerId ? this.getPlayers().find((p) => p.peerId === peerId) : undefined;
   }
 
   getLobby(): LobbyInfo {
-    return this.lobbyStore.get();
+    return this.roster.getLobby();
   }
 
   getActiveGame(): ActiveGame | undefined {
-    return this.hasSynced ? this.parts?.roomState.getState().game : undefined;
+    return this.lifecycle.hasSynced() ? this.parts?.roomState.getState().game : undefined;
   }
 
   getGameContext(): GameContext | undefined {
@@ -500,9 +477,9 @@ export class MultiplayerClient {
   getDebugState(): Record<string, unknown> {
     const parts = this.parts;
     return {
-      lifecycle: this.lifecycle,
+      lifecycle: this.lifecycle.get(),
       status: this.getStatus(),
-      hasSynced: this.hasSynced,
+      hasSynced: this.lifecycle.hasSynced(),
       phase: this.getPhase(),
       roomId: this.roomId,
       playerId: this.playerId,
@@ -527,11 +504,11 @@ export class MultiplayerClient {
   // ─── Events ───────────────────────────────────────────────────────────────
 
   onStatusChanged(handler: (status: ClientStatus) => void): () => void {
-    return this.statusStore.subscribe(handler);
+    return this.lifecycle.onStatusChanged(handler);
   }
 
   onPhaseChanged(handler: (phase: RoomPhase | undefined) => void): () => void {
-    return this.phaseStore.subscribe(handler);
+    return this.lifecycle.onPhaseChanged(handler);
   }
 
   onHostChanged(handler: (hostPeerId: SignalingPeerId | undefined) => void): () => void {
@@ -539,7 +516,7 @@ export class MultiplayerClient {
   }
 
   onPendingChanged(handler: (pending: boolean) => void): () => void {
-    return this.pendingStore.subscribe(handler);
+    return this.roster.onPendingChanged(handler);
   }
 
   /** Fires once per successful join, before the status can become "ready". */
@@ -574,12 +551,12 @@ export class MultiplayerClient {
 
   /** Fires only when the roster actually changed (same array reference otherwise). */
   onPlayersChanged(handler: (players: LobbyPlayer[]) => void): () => void {
-    return this.playersStore.subscribe(handler);
+    return this.roster.onPlayersChanged(handler);
   }
 
   /** Mode, team ids or all-ready changed. */
   onLobbyChanged(handler: (lobby: LobbyInfo) => void): () => void {
-    return this.lobbyStore.subscribe(handler);
+    return this.roster.onLobbyChanged(handler);
   }
 
   /** A game started, ended, or its context changed. */
@@ -675,7 +652,11 @@ export class MultiplayerClient {
     const parts = this.parts;
     if (!parts) return Promise.resolve(NOT_JOINED);
     const lobby = parts.roomState.getState().lobby;
-    return parts.roomState.startGame({ id: gameId, config, context: this.freezeContext(lobby) });
+    return parts.roomState.startGame({
+      id: gameId,
+      config,
+      context: this.roster.freezeContext(lobby),
+    });
   }
 
   /** The typed handle for a registered game. Same handle every call. */
@@ -699,23 +680,13 @@ export class MultiplayerClient {
 
   // ─── Private: derived state ───────────────────────────────────────────────
 
-  private freezeContext(lobby: LobbyConfig): GameContext {
-    const teams: Record<string, string> = {};
-    const participants: string[] = [];
-    for (const p of this.getPlayers()) {
-      participants.push(p.playerId);
-      if (lobby.mode === "teams" && p.teamId) teams[p.playerId] = p.teamId;
-    }
-    return { lobby, teams, participants };
-  }
-
   private handleRoomStateChanged(next: RoomState, prev: RoomState): void {
     if (JSON.stringify(next.lobby) !== JSON.stringify(prev.lobby)) {
       this.parts?.lobby.applyConfig(next.lobby);
     }
     // Round or lobby config changes alter ready/team projections.
     this.refreshPlayers();
-    this.syncDerived();
+    this.lifecycle.sync();
 
     if (next.phase !== prev.phase || JSON.stringify(next.game) !== JSON.stringify(prev.game)) {
       this.gameEm.emit(this.getActiveGame());
@@ -731,61 +702,18 @@ export class MultiplayerClient {
   }
 
   private refreshPlayers(): void {
-    const lobby = this.parts?.lobby;
-    const nextPlayers = lobby ? lobby.getPlayers() : [];
-    const config = lobby?.getConfig();
-    const nextInfo: LobbyInfo =
-      lobby && config
-        ? {
-            mode: config.mode,
-            teamIds: config.mode === "teams" ? config.teamIds : [],
-            allReady: lobby.areAllPlayersReady(),
-          }
-        : DEFAULT_LOBBY_INFO;
-
-    // Both caches first, then notify: a players listener must already see the fresh lobby info.
-    const notifyPlayers = this.playersStore.stage(nextPlayers);
-    const notifyLobby = this.lobbyStore.stage(nextInfo);
-    notifyPlayers?.();
-    notifyLobby?.();
-
-    if (notifyPlayers) this.parts?.hostRuntime.reconcile(); // late joiners
+    if (this.roster.refresh(this.parts?.lobby)) this.parts?.hostRuntime.reconcile(); // late joiners
   }
 
   private refreshPending(): void {
-    this.pendingStore.set(this.parts?.presence.isLocalPending() ?? false);
-  }
-
-  private computeStatus(): ClientStatus {
-    switch (this.lifecycle) {
-      case "idle":
-        return "idle";
-      case "joining":
-        return "joining";
-      case "superseded":
-        return "superseded";
-      case "kicked":
-        return "kicked";
-      case "joined":
-        return this.parts?.bus.getStatus() ?? "syncing";
-    }
-  }
-
-  private syncDerived(): void {
-    const status = this.computeStatus();
-    if (status === "ready") this.hasSynced = true;
-
-    const phase = this.hasSynced ? this.parts?.roomState.getState().phase : undefined;
-
-    this.statusStore.set(status);
-    this.phaseStore.set(phase);
+    this.roster.refreshPending(this.parts?.presence);
   }
 
   private readonly gameBackend = new ClientGameBackend(
     {
       getRoomState: () => this.parts?.roomState.getState(),
       getGame: (id) => this.parts?.games.get(id),
-      isSynced: () => this.hasSynced,
+      isSynced: () => this.lifecycle.hasSynced(),
       getPlayerId: () => this.playerId,
       start: (id, config) => this.startGameById(id, config),
     },

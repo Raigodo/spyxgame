@@ -12,8 +12,8 @@ export interface FakeRoom {
   peers: Map<SignalingPeerId, Date>;
   inboxes: Map<SignalingPeerId, Map<MessageId, SignalingMessage>>;
   host: HostDocument | null;
-  /** candidate peerId -> the dead host it registered for */
-  candidates: Map<SignalingPeerId, SignalingPeerId>;
+  /** candidate peerId -> the dead host it registered for, and whether it confirmed */
+  candidates: Map<SignalingPeerId, { dead: SignalingPeerId; confirmed: boolean }>;
 }
 
 interface Listener {

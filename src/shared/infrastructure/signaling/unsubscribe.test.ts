@@ -10,6 +10,7 @@ import { nextMacrotask } from "@/shared/testing/next-macrotask";
 import { RecordingLogger } from "@/shared/testing/recording-logger";
 import { HostElectionService } from "./host-election-service";
 import { SignalingSession } from "./signaling-session";
+import { PeerRemover } from "./peer-remover";
 
 const config = createConfig().signaling;
 
@@ -17,10 +18,16 @@ describe("HostElectionService.onHostChanged", () => {
   it("unsubscribing one handler leaves the others subscribed", async () => {
     const state = new FakeFirestoreState();
     const election = new FakeHostElection(state);
+    const membership = new FakeRoomMembership(state);
     const service = new HostElectionService({
-      membership: new FakeRoomMembership(state),
+      membership,
       election,
-      messages: new FakeSignalInbox(state),
+      remover: new PeerRemover({
+        membership,
+        messages: new FakeSignalInbox(state),
+        logger: new RecordingLogger(),
+        roomId: "r",
+      }),
       clock: new FakeClock(),
       logger: new RecordingLogger(),
       config,

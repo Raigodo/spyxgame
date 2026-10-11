@@ -1,10 +1,13 @@
+import { BusRecovery, type RecoveryResult } from "./bus-recovery";
 import { CommandQueue, type QueuedCommand } from "./command-queue";
+import type { ChannelHost } from "./channel-host";
+import { EventChannel, type BusEventChannel } from "./event-channel";
+import { StateChannel, type BusStateChannel } from "./state-channel";
 import type {
   BusOptions,
   BusStatus,
   BusTransport,
   CommandResult,
-  CommandSpec,
   EventChannelOptions,
   PeerId,
   StateChannelOptions,
@@ -20,269 +23,10 @@ import {
   type Logger,
   type ThrottledWarn,
 } from "@/shared/kernel";
-import {
-  compareVersions,
-  computeBusStatus,
-  isDuplicateCommand,
-  isRecoveryComplete,
-  shouldReplaceBest,
-} from "./bus-rules";
+import { computeBusStatus } from "./bus-rules";
 
-type ErasedHandler<S> = (args: {
-  from: PeerId;
-  isHostSender: boolean;
-  state: S;
-  payload: unknown;
-  playerId?: string;
-}) => { ok: true; state: S } | { ok: false; reason: string };
-
-/** What channels need from the bus (not part of the public API). */
-interface ChannelHost {
-  readonly transport: BusTransport;
-  canPublish(): boolean;
-  sendCommand(ch: string, type: string, payload: unknown): Promise<CommandResult>;
-  broadcast(wire: Wire): void;
-  sendTo(to: PeerId, wire: Wire): void;
-  statusMayHaveChanged(): void;
-}
-
-interface BusStateChannel {
-  readonly id: string;
-  isSynced(): boolean;
-  markUnsynced(): void;
-  copy(): ChannelCopy;
-  acceptState(c: ChannelCopy): void;
-  adoptIfNewer(c: ChannelCopy): void;
-  promote(): void;
-  sendSnapshot(to: PeerId): void;
-  execute(from: PeerId, seq: number, type: string, payload: unknown): CommandResult;
-  inspect(): Record<string, unknown>;
-}
-
-interface BusEventChannel {
-  readonly id: string;
-  receive(raw: unknown, from: PeerId): void;
-}
-
-// ─── StateChannel ───────────────────────────────────────────────────────────
-// Host-owned replicated value, versioned by (epoch, rev). Guests accept only
-// newer versions from the current host. Mutated on the host through commands
-// (pure reducers) or publish().
-
-export class StateChannel<S> implements BusStateChannel {
-  private epoch = 0;
-  private rev = 0;
-  private value: S;
-  private applied: Record<PeerId, number> = {};
-  private synced = false;
-  private readonly changed = new Emitter<{ value: S; prev: S }>();
-  private readonly handlers = new Map<string, ErasedHandler<S>>();
-
-  /** @internal use RoomBus.stateChannel() */
-  constructor(
-    private readonly host: ChannelHost,
-    readonly id: string,
-    private readonly opts: StateChannelOptions<S>
-  ) {
-    this.value = opts.initial;
-  }
-
-  get(): S {
-    return this.value;
-  }
-
-  onChange(handler: (value: S, prev: S) => void): () => void {
-    return this.changed.on(({ value, prev }) => handler(value, prev));
-  }
-
-  /** Registers a command type. Handlers run on whichever peer is host. */
-  handle<P>(type: string, spec: CommandSpec<S, P>): void {
-    this.handlers.set(type, ({ from, isHostSender, state, payload, playerId }) => {
-      if (spec.hostOnly && !isHostSender) return { ok: false, reason: "host-only" };
-      const parsed = spec.validate(payload);
-      if (parsed === undefined) return { ok: false, reason: "invalid-payload" };
-      const denied = spec.authorize?.({ from, state, isHostSender, playerId });
-      if (denied) return { ok: false, reason: denied };
-      return spec.reduce(state, parsed, { from, playerId });
-    });
-  }
-
-  send<P>(type: string, payload: P): Promise<CommandResult> {
-    return this.host.sendCommand(this.id, type, payload);
-  }
-
-  /** Host only. Prefer commands; publish() is for host-originated changes. */
-  publish(next: S): void {
-    if (!this.host.canPublish()) {
-      throw new Error(`[StateChannel:${this.id}] publish() requires a ready host.`);
-    }
-    this.commit(next);
-  }
-
-  // ── internal (used by RoomBus) ──
-
-  /** @internal */ isSynced(): boolean {
-    return this.synced;
-  }
-  /** @internal */ markUnsynced(): void {
-    this.synced = false;
-  }
-
-  /** @internal Values are left out on purpose: they can be large. */
-  inspect(): Record<string, unknown> {
-    return {
-      epoch: this.epoch,
-      rev: this.rev,
-      synced: this.synced,
-      applied: { ...this.applied },
-      commands: Array.from(this.handlers.keys()),
-    };
-  }
-
-  /** @internal */
-  copy(): ChannelCopy {
-    return {
-      ch: this.id,
-      epoch: this.epoch,
-      rev: this.rev,
-      value: this.value,
-      applied: { ...this.applied },
-    };
-  }
-
-  /** @internal Guest: accept a snapshot/update from the current host. */
-  acceptState(c: ChannelCopy): void {
-    const value = this.opts.validate(c.value);
-    if (value === undefined) return;
-    const order = compareVersions(c, this.version());
-    if (order < 0) return; // stale or from a demoted host
-    this.synced = true;
-    if (order === 0) return; // identical version: just confirms we are in sync
-    this.adopt(c, value);
-  }
-
-  /** @internal Host: adopt the best offered copy during recovery. */
-  adoptIfNewer(c: ChannelCopy): void {
-    if (compareVersions(c, this.version()) <= 0) return;
-    const value = this.opts.validate(c.value);
-    if (value !== undefined) this.adopt(c, value);
-  }
-
-  /** @internal Host: start a new epoch and tell everyone. */
-  promote(): void {
-    this.epoch += 1;
-    this.rev = 0;
-    this.synced = true;
-    this.host.broadcast(this.stateWire());
-  }
-
-  /** @internal */
-  sendSnapshot(to: PeerId): void {
-    this.host.sendTo(to, this.stateWire());
-  }
-
-  /** @internal Host: apply a command exactly once per (sender, seq). */
-  execute(from: PeerId, seq: number, type: string, payload: unknown): CommandResult {
-    if (isDuplicateCommand(this.applied, from, seq)) return { ok: true }; // duplicate re-send
-
-    const handler = this.handlers.get(type);
-    const out: ReturnType<ErasedHandler<S>> = handler
-      ? handler({
-          from,
-          isHostSender: from === this.host.transport.getLocalPeerId(),
-          state: this.value,
-          payload,
-          playerId: this.opts.resolveSender?.(from),
-        })
-      : { ok: false, reason: "unknown-command" };
-
-    this.applied[from] = seq; // accepted or rejected, never re-run
-    if (!out.ok) return { ok: false, kind: "rejected", reason: out.reason };
-
-    this.commit(out.state); // applied[] is replicated in the same commit
-    return { ok: true };
-  }
-
-  private version(): { epoch: number; rev: number } {
-    return { epoch: this.epoch, rev: this.rev };
-  }
-
-  private commit(next: S): void {
-    const prev = this.value;
-    this.value = next;
-    this.rev += 1;
-    this.synced = true;
-    this.host.broadcast(this.stateWire());
-    this.emit(next, prev);
-  }
-
-  private adopt(c: ChannelCopy, value: S): void {
-    const prev = this.value;
-    this.epoch = c.epoch;
-    this.rev = c.rev;
-    this.applied = { ...c.applied };
-    this.value = value;
-    this.emit(value, prev);
-  }
-
-  private emit(value: S, prev: S): void {
-    this.changed.emit({ value, prev });
-  }
-
-  private stateWire(): Wire {
-    return { __bus: 1, kind: "state", ...this.copy() };
-  }
-}
-
-// ─── EventChannel ───────────────────────────────────────────────────────────
-// Ephemeral: no versioning, no replay. Delivered locally to the sender too,
-// so callers don't need to special-case their own messages.
-
-export class EventChannel<E> implements BusEventChannel {
-  private readonly received = new Emitter<{ event: E; from: PeerId }>();
-
-  /** @internal use RoomBus.eventChannel() */
-  constructor(
-    private readonly host: ChannelHost,
-    readonly id: string,
-    private readonly opts: EventChannelOptions<E>
-  ) {}
-
-  onEvent(handler: (event: E, from: PeerId) => void): () => void {
-    return this.received.on(({ event, from }) => handler(event, from));
-  }
-
-  broadcast(event: E): void {
-    this.host.broadcast({ __bus: 1, kind: "event", ch: this.id, event });
-    this.deliverLocal(event);
-  }
-
-  sendTo(peerId: PeerId, event: E): void {
-    if (peerId === this.host.transport.getLocalPeerId()) return this.deliverLocal(event);
-    this.host.sendTo(peerId, { __bus: 1, kind: "event", ch: this.id, event });
-  }
-
-  /** @internal */
-  receive(raw: unknown, from: PeerId): void {
-    const event = this.opts.validate(raw);
-    if (event !== undefined) this.received.emit({ event, from });
-  }
-
-  private deliverLocal(event: E): void {
-    const from = this.host.transport.getLocalPeerId();
-    if (from) this.received.emit({ event, from });
-  }
-}
-
-// ─── RoomBus ────────────────────────────────────────────────────────────────
-
-interface Recovery {
-  best: Map<string, ChannelCopy>;
-  offeredBy: Set<PeerId>;
-  cancelSlide?: Cancel;
-  cancelMax: Cancel;
-  held: Array<{ w: Extract<Wire, { kind: "command" }>; from: PeerId }>;
-}
+/** One handler per wire kind. A new kind in `Wire` does not compile until it has one here. */
+type WireHandlers = { [K in Wire["kind"]]: (w: Extract<Wire, { kind: K }>, from: PeerId) => void };
 
 export interface RoomBusDeps {
   transport: BusTransport;
@@ -309,7 +53,7 @@ export class RoomBus {
   private status: BusStatus = "syncing";
   private started = false;
   private wasHost = false;
-  private recovery?: Recovery;
+  private recovery?: BusRecovery;
   private seq = 0;
 
   constructor(private readonly deps: RoomBusDeps) {
@@ -379,7 +123,6 @@ export class RoomBus {
   }
 
   inspect(): Record<string, unknown> {
-    const recovery = this.recovery;
     return {
       status: this.status,
       started: this.started,
@@ -388,13 +131,7 @@ export class RoomBus {
       isHost: this.transport.isHost(),
       seq: this.seq,
       resyncing: this.cancelResync !== undefined,
-      recovery: recovery
-        ? {
-            offeredBy: Array.from(recovery.offeredBy),
-            adopted: Array.from(recovery.best.keys()),
-            held: recovery.held.length,
-          }
-        : null,
+      recovery: this.recovery?.inspect() ?? null,
       queue: this.queue.pending().map((c) => ({
         id: c.id,
         seq: c.seq,
@@ -424,6 +161,44 @@ export class RoomBus {
 
   // ─── Incoming ─────────────────────────────────────────────────────────────
 
+  private readonly wireHandlers: WireHandlers = {
+    state: (w, from) => {
+      if (from !== this.transport.getHostPeerId() || this.transport.isHost()) return;
+      this.stateChannels.get(w.ch)?.acceptState(w);
+      this.refreshStatus();
+    },
+    ack: (w, from) => {
+      if (from !== this.transport.getHostPeerId()) return;
+      if (!w.result.ok) {
+        this.deps.logger.info(`Command ${w.id} rejected by host: ${w.result.reason}`);
+      }
+      this.queue.ack(w.id, w.result);
+    },
+    event: (w, from) => {
+      this.eventChannels.get(w.ch)?.receive(w.event, from);
+    },
+    offer: (w, from) => {
+      if (this.transport.isHost() && this.recovery) this.recovery.recordOffer(from, w.channels);
+    },
+    sync: (w, from) => {
+      if (this.transport.isHost() && !this.recovery) {
+        this.stateChannels.get(w.ch)?.sendSnapshot(from);
+      }
+    },
+    command: (w, from) => {
+      if (!this.transport.isHost()) return; // stale routing; the sender re-sends after it learns the host
+      if (this.recovery) this.recovery.hold(w, from);
+      else this.processRemoteCommand(w, from);
+    },
+    recover: (_w, from) => {
+      // The new host asks for our copies. (The mirror image of guests offering on link-up:
+      // between the two, an offer that arrives before the host knows it is host is never lost.)
+      if (!this.transport.isHost() && from === this.transport.getHostPeerId()) {
+        this.syncWithHost();
+      }
+    },
+  };
+
   private handleWire(payload: unknown, from: PeerId): void {
     if (from === this.transport.getLocalPeerId()) return; // own broadcast echoed back
     const w = parseWire(payload);
@@ -434,44 +209,7 @@ export class RoomBus {
       });
       return;
     }
-
-    const hostId = this.transport.getHostPeerId();
-    const iAmHost = this.transport.isHost();
-
-    switch (w.kind) {
-      case "state":
-        if (from !== hostId || iAmHost) return;
-        this.stateChannels.get(w.ch)?.acceptState(w);
-        this.refreshStatus();
-        break;
-      case "ack":
-        if (from === hostId) {
-          if (!w.result.ok) {
-            this.deps.logger.info(`Command ${w.id} rejected by host: ${w.result.reason}`);
-          }
-          this.queue.ack(w.id, w.result);
-        }
-        break;
-      case "event":
-        this.eventChannels.get(w.ch)?.receive(w.event, from);
-        break;
-      case "offer":
-        if (iAmHost && this.recovery) this.recordOffer(from, w.channels);
-        break;
-      case "sync":
-        if (iAmHost && !this.recovery) this.stateChannels.get(w.ch)?.sendSnapshot(from);
-        break;
-      case "command":
-        if (!iAmHost) return; // stale routing; the sender re-sends after it learns the host
-        if (this.recovery) this.recovery.held.push({ w, from });
-        else this.processRemoteCommand(w, from);
-        break;
-      case "recover":
-        // The new host asks for our copies. (The mirror image of guests offering on link-up:
-        // between the two, an offer that arrives before the host knows it is host is never lost.)
-        if (!iAmHost && from === hostId) this.syncWithHost();
-        break;
-    }
+    (this.wireHandlers[w.kind] as (w: Wire, from: PeerId) => void)(w, from);
   }
 
   private processRemoteCommand(w: Extract<Wire, { kind: "command" }>, from: PeerId): void {
@@ -528,7 +266,7 @@ export class RoomBus {
 
   private handleLinkActive(peerId: PeerId): void {
     if (this.transport.isHost()) {
-      if (this.recovery) this.noteRecoveryActivity();
+      if (this.recovery) this.recovery.noteActivity();
       else for (const channel of this.stateChannels.values()) channel.sendSnapshot(peerId);
     } else if (peerId === this.transport.getHostPeerId()) {
       this.syncWithHost();
@@ -617,79 +355,46 @@ export class RoomBus {
 
   // ─── Promotion recovery ───────────────────────────────────────────────────
   // A new host may be a freshly refreshed tab with empty state. Before it
-  // publishes anything, it asks (implicitly: guests offer when their link comes
-  // up) for every guest's copy and adopts the newest.
+  // publishes anything, it asks (and guests offer when their link comes up) for
+  // every guest's copy and adopts the newest. The collecting is in BusRecovery.
 
   private beginRecovery(): void {
     this.endRecovery();
     this.cancelResync?.();
     this.cancelResync = undefined;
-    this.recovery = {
-      best: new Map(),
-      offeredBy: new Set(),
-      held: [],
-      cancelMax: this.deps.clock.after(this.options.recoveryMaxMs, () => this.finishRecovery()),
-    };
+    const recovery = new BusRecovery({
+      clock: this.deps.clock,
+      windowMs: this.options.recoveryWindowMs,
+      maxMs: this.options.recoveryMaxMs,
+      getExpectedPeerIds: () => this.transport.getExpectedPeerIds(),
+      onFinish: (result) => this.finishRecovery(result),
+    });
+    this.recovery = recovery;
     this.transport.broadcast({ __bus: 1, kind: "recover" });
-    this.checkRecoveryComplete();
+    recovery.checkComplete(); // may finish right here when nobody else is expected
   }
 
-  private recordOffer(from: PeerId, channels: ChannelCopy[]): void {
-    const recovery = this.recovery;
-    if (!recovery) return;
-    recovery.offeredBy.add(from);
-    for (const copy of channels) {
-      const prior = recovery.best.get(copy.ch);
-      if (shouldReplaceBest(copy, prior)) recovery.best.set(copy.ch, copy);
-    }
-    this.noteRecoveryActivity();
-  }
-
-  private noteRecoveryActivity(): void {
-    const recovery = this.recovery;
-    if (!recovery) return;
-    recovery.cancelSlide?.();
-    recovery.cancelSlide = this.deps.clock.after(this.options.recoveryWindowMs, () =>
-      this.finishRecovery()
-    );
-    this.checkRecoveryComplete();
-  }
-
-  private checkRecoveryComplete(): void {
-    const recovery = this.recovery;
-    if (!recovery) return;
-    if (isRecoveryComplete(this.transport.getExpectedPeerIds(), recovery.offeredBy)) {
-      this.finishRecovery();
-    }
-  }
-
-  private finishRecovery(): void {
-    const recovery = this.recovery;
-    if (!recovery) return;
+  private finishRecovery(result: RecoveryResult): void {
     this.recovery = undefined; // before publishing, so canPublish() is true
-    recovery.cancelSlide?.();
-    recovery.cancelMax();
 
     this.deps.logger.debug("Recovery finished", {
-      offers: recovery.offeredBy.size,
-      adopted: Array.from(recovery.best.keys()),
-      held: recovery.held.length,
+      offers: result.offers,
+      adopted: Array.from(result.best.keys()),
+      held: result.held.length,
     });
 
     for (const channel of this.stateChannels.values()) {
-      const offered = recovery.best.get(channel.id);
+      const offered: ChannelCopy | undefined = result.best.get(channel.id);
       if (offered) channel.adoptIfNewer(offered);
       channel.promote();
     }
-    for (const { w, from } of recovery.held) this.processRemoteCommand(w, from);
+    for (const { w, from } of result.held) this.processRemoteCommand(w, from);
     this.flushQueue();
     this.refreshStatus();
   }
 
   private endRecovery(): void {
-    if (!this.recovery) return;
-    this.recovery.cancelSlide?.();
-    this.recovery.cancelMax();
+    this.recovery?.cancel();
     this.recovery = undefined;
   }
 

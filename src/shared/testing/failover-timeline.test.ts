@@ -37,6 +37,11 @@ describe("failover timeline: host dies", () => {
         recovered: () => b.client.isHost() && dig(state(), "bus", "recovery") === null,
         ready: () => b.client.isHost() && b.client.getStatus() === "ready",
         deadRowGone: () => b.client.getPlayers().length === 1,
+        memberRemoved: () => !h.firestore.room(ROOM).peers.has(deadId),
+        ghostShown: () =>
+          b.client
+            .getPlayers()
+            .some((p) => p.peerId === deadId && p.connectionStatus === "reconnecting"),
       },
       40_000
     );
@@ -48,6 +53,8 @@ describe("failover timeline: host dies", () => {
     expect(t.hostWritten).toBeDefined();
     expect(t.hostWritten ?? Infinity).toBeLessThan(8_000);
     expect(t.deadRowGone).toBeDefined();
+    // Removal waits for the 3s window, then the 4s ghost grace: about 8s after the kill.
+    expect(t.deadRowGone ?? Infinity).toBeLessThan(10_000);
     // Order: detection comes before the election result, which comes before readiness.
     expect(t.linkLost ?? Infinity).toBeLessThanOrEqual(t.hostWritten ?? -1);
     expect(t.hostWritten ?? Infinity).toBeLessThanOrEqual(t.ready ?? -1);
@@ -87,6 +94,7 @@ describe("failover timeline: guest dies", () => {
     expect(t.memberRemoved).toBeDefined();
     expect(t.memberRemoved ?? Infinity).toBeLessThan(30_000);
     expect(t.rowGone).toBeDefined();
+    expect(t.rowGone ?? Infinity).toBeLessThan(23_000); // 15s ack timeout + 1s detection + 4s grace
     expect(t.memberRemoved ?? Infinity).toBeLessThanOrEqual(t.rowGone ?? -1);
   }, 65_000);
 });

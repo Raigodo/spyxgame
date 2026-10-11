@@ -10,7 +10,11 @@ import {
   type DocumentData,
   type Firestore,
 } from "firebase/firestore";
-import type { HostDocument, HostElectionPort } from "../../ports/host-election-port";
+import type {
+  CandidateStage,
+  HostDocument,
+  HostElectionPort,
+} from "../../ports/host-election-port";
 import type { RoomId, SignalingPeerId } from "../../types";
 import type { Logger, Unsubscribe } from "@/shared/kernel";
 import { expiresAt, type Retention } from "./expiry";
@@ -65,10 +69,12 @@ export class FirestoreHostElectionAdapter implements HostElectionPort {
   async registerCandidate(
     roomId: RoomId,
     peerId: SignalingPeerId,
-    deadHostPeerId: SignalingPeerId
+    deadHostPeerId: SignalingPeerId,
+    stage: CandidateStage
   ): Promise<void> {
     await setDoc(this.candidateRef(roomId, peerId), {
       deadHostPeerId,
+      confirmed: stage === "confirmed",
       expiresAt: this.expiry(this.retention.config.candidateRetentionMs),
     });
   }
@@ -79,11 +85,18 @@ export class FirestoreHostElectionAdapter implements HostElectionPort {
 
   async listCandidates(
     roomId: RoomId,
-    deadHostPeerId: SignalingPeerId
+    deadHostPeerId: SignalingPeerId,
+    stage?: CandidateStage
   ): Promise<SignalingPeerId[]> {
     const snapshot = await getDocs(this.candidatesRef(roomId));
     return snapshot.docs
-      .filter((document) => document.data().deadHostPeerId === deadHostPeerId)
+      .filter((document) => {
+        const data = document.data();
+        return (
+          data.deadHostPeerId === deadHostPeerId &&
+          (stage !== "confirmed" || data.confirmed === true)
+        );
+      })
       .map((document) => document.id);
   }
 

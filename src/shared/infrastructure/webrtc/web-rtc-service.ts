@@ -1,5 +1,7 @@
 import {
   Emitter,
+  ThrottledWarn,
+  createThrottledWarn,
   logFailure,
   shortId,
   type Clock,
@@ -16,6 +18,7 @@ import { RtcPeerRegistry } from "./rtc-peer-registry";
 import { RtcReconnectionManager } from "./rtc-reconnection-manager";
 import { RtcSignalRouter } from "./rtc-signal-router";
 import type { FormerHost, HostTransferResult, RtcPeer } from "./types";
+import { parseRtcSignal } from "./rtc-signal";
 
 export interface WebRtcServiceDeps {
   session: SignalingSession;
@@ -36,6 +39,7 @@ export class WebRtcService {
   private readonly hostRole: RtcHostRole;
   private readonly reclaim: HostReclaimController;
   private readonly signalRouter: RtcSignalRouter;
+  private readonly warnBadSignal: ThrottledWarn;
 
   private readonly peerJoined = new Emitter<RtcPeer>();
   private readonly peerLeft = new Emitter<{ signalingPeerId: SignalingPeerId }>();
@@ -100,6 +104,8 @@ export class WebRtcService {
       linkFactory: this.linkFactory,
       logger: logger.child("signals"),
     });
+
+    this.warnBadSignal = createThrottledWarn(logger, clock);
   }
 
   private get session(): SignalingSession {
@@ -129,6 +135,7 @@ export class WebRtcService {
       throw error;
     }
 
+    this.session.setAckTimeoutVeto((peerId) => this.vetoAckRemoval(peerId));
     this.reconnectionManager.start();
 
     this.cleanupFns.push(
@@ -150,8 +157,15 @@ export class WebRtcService {
       }),
 
       this.session.onSignalReceived((message) => {
+        const signal = parseRtcSignal(message.payload);
+        if (!signal) {
+          this.warnBadSignal(`signal:${message.fromPeerId}`, "Dropped invalid signal", {
+            from: message.fromPeerId,
+          });
+          return;
+        }
         void this.signalRouter
-          .handle(message.fromPeerId, message.payload)
+          .handle(message.fromPeerId, signal)
           .catch(logFailure(this.log, "handle signal"));
       }),
 
@@ -287,6 +301,15 @@ export class WebRtcService {
 
   onHostChanged(handler: (hostPeerId: SignalingPeerId | undefined) => void): () => void {
     return this.hostChanged.on(handler);
+  }
+
+  // A signal to this peer went unanswered. If its data channel is active it is alive by another
+  // route: keep it. A really dead link is caught by the connection-state handler.
+  private vetoAckRemoval(peerId: SignalingPeerId): boolean {
+    const entry = this.registry.get(peerId);
+    if (!entry || !entry.connection || entry.status !== "active") return false;
+    this.log.warn(`Peer=${shortId(peerId)} ignored a signal but its link is active: keeping it`);
+    return true;
   }
 
   // ─── Leaving ──────────────────────────────────────────────────────────────

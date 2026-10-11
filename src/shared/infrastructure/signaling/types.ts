@@ -14,17 +14,3 @@ export interface SignalingMessage<T = unknown> {
   timestamp: Date;
   payload: T;
 }
-
-export type WebRtcSignal =
-  | {
-      type: "offer";
-      sdp: string;
-    }
-  | {
-      type: "answer";
-      sdp: string;
-    }
-  | {
-      type: "ice-candidate";
-      candidate: RTCIceCandidateInit;
-    };

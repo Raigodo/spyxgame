@@ -9,6 +9,8 @@ export interface AppConfig {
   signaling: {
     candidateCollectionWindowMs: number;
     positionIntervalMs: number;
+    /** After confirming candidacy, how long to wait for the other candidates to confirm. */
+    candidateConfirmWindowMs: number;
     ackTimeoutMs: number;
     /** Firestore TTL for signal messages and election candidates (transient). */
     messageRetentionMs: number;
@@ -57,7 +59,8 @@ export type ConfigOverrides = { [K in keyof AppConfig]?: Partial<AppConfig[K]> }
 export const DEFAULT_CONFIG: AppConfig = {
   signaling: {
     candidateCollectionWindowMs: 3_000,
-    positionIntervalMs: 2_000,
+    positionIntervalMs: 1_500,
+    candidateConfirmWindowMs: 700,
     ackTimeoutMs: 15_000,
     messageRetentionMs: 60 * 60 * 1000,
     candidateRetentionMs: 60 * 60 * 1000,
@@ -86,7 +89,7 @@ export const DEFAULT_CONFIG: AppConfig = {
     duplicateRevealTimeoutMs: 4_000,
     helloIntervalMs: 3_000,
     linkWaitMs: 8_000,
-    departureGraceMs: 10_000,
+    departureGraceMs: 4_000,
   },
   chat: {
     burst: 30,

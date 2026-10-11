@@ -2,43 +2,29 @@ import {
   Emitter,
   listenerFailure,
   shortId,
-  type Cancel,
   type Clock,
   type IdGenerator,
   type Logger,
   type PresenceConfig,
 } from "@/shared/kernel";
-import type { EventChannel, RoomBus } from "@/shared/application/messaging";
+import type { EventChannel, RoomBus, StateChannel } from "@/shared/application/messaging";
 import type { PlayerSession } from "@/shared/infrastructure/player";
 import type { SignalingPeerId } from "@/shared/infrastructure/signaling";
-import type { RtcPeerStatus } from "@/shared/infrastructure/webrtc";
-import {
-  findDuplicateGroups,
-  findExistingDuplicate,
-  findSurvivor,
-  planArbitration,
-  readPlayerId,
-} from "./duplicate-rules";
+import { DuplicateArbiter } from "./duplicate-arbiter";
+import { DuplicateView } from "./duplicate-view";
+import { readPlayerId } from "./duplicate-rules";
+import { PresenceBook } from "./presence-book";
+import { parsePresenceEvent, type PresenceEvent } from "./presence-events";
 import type { PlayerPresence } from "./types";
 import {
-  parsePresenceEvent,
-  type PersistedMetadata,
-  type PresenceEvent,
-  type PresenceMap,
-} from "./presence-events";
-
-interface PendingArbitration {
-  nonce: string;
-  oldPeerId: SignalingPeerId;
-  newPeerId: SignalingPeerId;
-  cancelTimeout: Cancel;
-}
-
-interface ActiveDuplicate {
-  oldPeerId: SignalingPeerId;
-  newPeerId: SignalingPeerId;
-  cancelSafety: Cancel;
-}
+  findEntry,
+  missingKeys,
+  parseEntry,
+  parseHistory,
+  rememberEntry,
+  type HistoryEntry,
+  type HistoryState,
+} from "./presence-history";
 
 export interface PlayerReconnectionCoordinatorDeps {
   session: PlayerSession;
@@ -49,37 +35,28 @@ export interface PlayerReconnectionCoordinatorDeps {
   config: PresenceConfig;
 }
 
-// The only place in the app that knows about connection status, "have we seen this playerId
-// before" history, and the same-playerId-live-twice case. Wrapped by PlayerPresenceService.
+// The presence event dispatcher. The only place in the app that knows about connection status,
+// "have we seen this playerId before" history, and the same-playerId-live-twice case, split into:
+//  - PresenceBook: the data (host statuses, returning peers, history, the host's last status map).
+//  - DuplicateView: every peer's hiding/reveal of a disputed pair.
+//  - DuplicateArbiter: host only, decides which duplicate survives.
+// This class wires them to the session and the "presence" event channel. Wrapped by
+// PlayerPresenceService.
 //
 //  - Connection status: host-only. The host is the only peer with a direct link to everyone, so
 //    it broadcasts that state.
 //  - Returning players: host-only. On departure, the player's metadata is snapshotted under their
 //    durable playerId; when that playerId rejoins, the host replays it.
-//  - Duplicate sessions: host-only, liveness-based. The host pings the existing peer; a reply
-//    rejects the newcomer, silence removes the existing one as a ghost. Also runs on promotion.
-//  - Display hiding: while arbitration runs, every peer shows ONE entry for the disputed
-//    playerId and withholds the newcomer until the outcome is known.
+//  - Duplicate sessions: host-only, liveness-based. Also runs on promotion.
 export class PlayerReconnectionCoordinator {
   private readonly session: PlayerSession;
   private readonly clock: Clock;
-  private readonly ids: IdGenerator;
   private readonly log: Logger;
   private readonly config: PresenceConfig;
 
-  private readonly hostStatuses = new Map<SignalingPeerId, RtcPeerStatus>();
-  private readonly returningPeerIds = new Set<SignalingPeerId>();
-  private readonly history = new Map<string, PersistedMetadata>();
-  private remotePresence: PresenceMap = {};
-
-  // Host-only: the ping/timeout for an in-flight liveness check, per playerId.
-  private readonly pendingArbitrations = new Map<string, PendingArbitration>();
-
-  // Every peer: which (playerId -> old/new peerId pair) is currently disputed.
-  private readonly activeDuplicates = new Map<string, ActiveDuplicate>();
-
-  // Cancel functions for arbitrations waiting on data-channel links.
-  private readonly linkWaits = new Set<() => void>();
+  private readonly book = new PresenceBook();
+  private readonly view: DuplicateView;
+  private readonly arbiter: DuplicateArbiter;
 
   private readonly onListenerError = listenerFailure(() => this.log);
   private readonly changed = new Emitter(this.onListenerError);
@@ -90,12 +67,15 @@ export class PlayerReconnectionCoordinator {
   private readonly cleanupFns: Array<() => void> = [];
 
   private readonly channel: EventChannel<PresenceEvent>;
+  // Departed players' metadata, replicated by the bus so it survives a host change.
+  private readonly history: StateChannel<HistoryState>;
   private wasHost: boolean;
+  private selfRestored = false;
+  private selfRestoreUntil = 0;
 
   constructor(deps: PlayerReconnectionCoordinatorDeps) {
     this.session = deps.session;
     this.clock = deps.clock;
-    this.ids = deps.ids;
     this.log = deps.logger;
     this.config = deps.config;
     const { session, bus } = deps;
@@ -107,13 +87,49 @@ export class PlayerReconnectionCoordinator {
     });
     this.wasHost = session.isHost();
 
+    this.history = bus.stateChannel<HistoryState>({
+      id: "presence:history",
+      initial: [],
+      validate: parseHistory,
+      resolveSender: (peerId) => {
+        const profile = session.getPlayers().find((p) => p.peerId === peerId);
+        return profile && readPlayerId(profile.metadata);
+      },
+    });
+    this.history.handle<HistoryEntry>("remember", {
+      validate: parseEntry,
+      authorize: ({ playerId }) => (playerId === undefined ? "unknown-sender" : undefined),
+      reduce: (state, entry) => ({ ok: true, state: rememberEntry(state, entry) }),
+    });
+    if (this.wasHost) this.armSelfRestore();
+
+    this.view = new DuplicateView({
+      clock: deps.clock,
+      config: deps.config,
+      isPresent: (peerId) => session.getPlayers().some((p) => p.peerId === peerId),
+      getPresentPeerIds: () => new Set(session.getPlayers().map((p) => p.peerId)),
+      onReveal: (peerId) => this.revealed.emit(peerId),
+      onChanged: () => this.changed.emit(),
+    });
+    this.arbiter = new DuplicateArbiter({
+      session,
+      clock: deps.clock,
+      ids: deps.ids,
+      logger: deps.logger,
+      config: deps.config,
+      channel: this.channel,
+      announce: (playerId, oldPeerId, newPeerId) =>
+        this.broadcastDuplicateDetected(playerId, oldPeerId, newPeerId),
+      reject: (peerId) => this.reject(peerId),
+    });
+
     const localPeerId = session.getLocalPlayer()?.peerId;
     for (const profile of session.getPlayers()) {
       if (profile.peerId === localPeerId) continue;
       const status = session.getPeerConnectionStatus(profile.peerId);
-      if (status) this.hostStatuses.set(profile.peerId, status);
+      if (status) this.book.setStatus(profile.peerId, status);
     }
-    if (session.isHost()) this.arbitrateExistingDuplicates();
+    if (session.isHost()) this.arbiter.arbitrateExisting();
 
     this.cleanupFns.push(
       session.onPeerConnectionStatusChanged((peer) => {
@@ -123,7 +139,7 @@ export class PlayerReconnectionCoordinator {
           }
           return;
         }
-        this.hostStatuses.set(peer.signalingPeerId, peer.status);
+        this.book.setStatus(peer.signalingPeerId, peer.status);
         this.syncAndBroadcast();
       }),
 
@@ -131,17 +147,17 @@ export class PlayerReconnectionCoordinator {
 
       session.onPlayerJoined((profile) => {
         if (!session.isHost()) return;
-        this.arbitrateIfDuplicate(profile);
+        this.arbiter.arbitrateIfDuplicate(profile);
 
-        this.hostStatuses.set(
+        this.book.setStatus(
           profile.peerId,
           session.getPeerConnectionStatus(profile.peerId) ?? "connecting"
         );
 
         const playerId = readPlayerId(profile.metadata);
-        const remembered = playerId ? this.history.get(playerId) : undefined;
+        const remembered = playerId ? this.recall(playerId) : undefined;
         if (remembered) {
-          this.returningPeerIds.add(profile.peerId);
+          this.book.markReturning(profile.peerId);
           this.channel.sendTo(profile.peerId, { t: "restore", metadata: remembered });
         }
 
@@ -150,30 +166,30 @@ export class PlayerReconnectionCoordinator {
 
       session.onPlayerLeft((profile) => {
         const playerId = readPlayerId(profile.metadata);
-        if (playerId) this.history.set(playerId, { ...profile.metadata });
+        this.rememberDeparture(profile.peerId, playerId, profile.metadata);
 
         // Refresh case: the ghost (old peer) leaves while its replacement is already in the
-        // room. The join-time restore found nothing in `history` back then, so hand the ghost's
-        // metadata to the survivor now. Must run BEFORE resolveActiveDuplicate, which fires the
+        // room. The join-time restore found nothing in history back then, so hand the ghost's
+        // metadata to the survivor now. Must run BEFORE view.resolveDeparted, which fires the
         // reveal that decides joined-vs-rejoined from `returning`.
         if (session.isHost() && playerId) {
-          const survivor = this.findSurvivorReplacing(profile.peerId);
+          const survivor = this.view.survivorReplacing(profile.peerId);
           if (survivor) {
-            this.returningPeerIds.add(survivor);
+            this.book.markReturning(survivor);
             this.channel.sendTo(survivor, { t: "restore", metadata: { ...profile.metadata } });
           }
         }
 
-        this.resolveActiveDuplicate(profile.peerId);
+        this.view.resolveDeparted(profile.peerId);
 
         if (session.isHost()) {
-          this.hostStatuses.delete(profile.peerId);
-          this.returningPeerIds.delete(profile.peerId);
+          this.book.forgetPeer(profile.peerId);
           this.syncAndBroadcast();
         }
       }),
 
-      this.channel.onEvent((event, from) => this.handleEvent(event, from))
+      this.channel.onEvent((event, from) => this.handleEvent(event, from)),
+      this.history.onChange(() => this.tryRestoreSelf())
     );
 
     // The host's one-time status broadcast can be dropped around a host change; keep asking
@@ -186,35 +202,18 @@ export class PlayerReconnectionCoordinator {
   dispose(): void {
     for (const cleanup of this.cleanupFns) cleanup();
     this.cleanupFns.length = 0;
-    for (const cancel of Array.from(this.linkWaits)) cancel();
-    this.linkWaits.clear();
-    for (const arbitration of this.pendingArbitrations.values()) arbitration.cancelTimeout();
-    for (const duplicate of this.activeDuplicates.values()) duplicate.cancelSafety();
-    this.pendingArbitrations.clear();
-    this.activeDuplicates.clear();
-    this.hostStatuses.clear();
-    this.returningPeerIds.clear();
-    this.history.clear();
-    this.remotePresence = {};
+    this.arbiter.cancelAll();
+    this.view.dispose();
+    this.book.dispose();
   }
 
   inspect(): Record<string, unknown> {
-    const pairs = (m: ReadonlyMap<string, { oldPeerId: string; newPeerId: string }>) =>
-      Object.fromEntries(
-        Array.from(m, ([playerId, d]) => [
-          playerId,
-          { oldPeerId: d.oldPeerId, newPeerId: d.newPeerId },
-        ])
-      );
     return {
       wasHost: this.wasHost,
-      hostStatuses: Object.fromEntries(this.hostStatuses),
-      returning: Array.from(this.returningPeerIds),
-      historyPlayerIds: Array.from(this.history.keys()), // keys only: metadata stays out of dumps
-      remotePresence: this.remotePresence,
-      pendingArbitrations: pairs(this.pendingArbitrations),
-      activeDuplicates: pairs(this.activeDuplicates),
-      linkWaits: this.linkWaits.size,
+      ...this.book.inspect(),
+      historyPlayerIds: this.history.get().map((e) => e.playerId), // ids only: no metadata in dumps
+      activeDuplicates: this.view.inspect(),
+      ...this.arbiter.inspect(),
     };
   }
 
@@ -222,37 +221,34 @@ export class PlayerReconnectionCoordinator {
     const localPeerId = this.session.getLocalPlayer()?.peerId;
 
     if (targetPeerId === localPeerId) {
-      return { status: "self", returning: this.remotePresence[targetPeerId]?.returning ?? false };
+      return { status: "self", returning: this.book.remote(targetPeerId)?.returning ?? false };
     }
 
-    if (this.isReconnectingDuringArbitration(targetPeerId)) {
-      return { status: "reconnecting", returning: this.returningPeerIds.has(targetPeerId) };
+    if (this.view.isReconnecting(targetPeerId)) {
+      return { status: "reconnecting", returning: this.book.isReturning(targetPeerId) };
     }
 
     if (this.session.isHost()) {
       return {
-        status: this.hostStatuses.get(targetPeerId) ?? "connecting",
-        returning: this.returningPeerIds.has(targetPeerId),
+        status: this.book.statusOf(targetPeerId) ?? "connecting",
+        returning: this.book.isReturning(targetPeerId),
       };
     }
 
     if (targetPeerId === this.session.getHostPeerId()) {
       return {
         status: this.session.getPeerConnectionStatus(targetPeerId) ?? "connecting",
-        returning: this.remotePresence[targetPeerId]?.returning ?? false,
+        returning: this.book.remote(targetPeerId)?.returning ?? false,
       };
     }
 
-    const remote = this.remotePresence[targetPeerId];
+    const remote = this.book.remote(targetPeerId);
     return { status: remote?.status ?? "connecting", returning: remote?.returning ?? false };
   }
 
   // True for the newcomer's peerId while its duplicate is being arbitrated.
   isHiddenDuringArbitration(peerId: SignalingPeerId): boolean {
-    for (const duplicate of this.activeDuplicates.values()) {
-      if (duplicate.newPeerId === peerId) return true;
-    }
-    return false;
+    return this.view.isHidden(peerId);
   }
 
   // True while the local (guest) peer is still being acknowledged by the host or is the newcomer
@@ -263,18 +259,8 @@ export class PlayerReconnectionCoordinator {
     const localPeerId = this.session.getLocalPlayer()?.peerId;
     if (!localPeerId) return false;
 
-    if (this.remotePresence[localPeerId] === undefined) return true; // host hasn't acknowledged us yet
-    for (const duplicate of this.activeDuplicates.values()) {
-      if (duplicate.newPeerId === localPeerId) return true;
-    }
-    return false;
-  }
-
-  private isReconnectingDuringArbitration(peerId: SignalingPeerId): boolean {
-    for (const duplicate of this.activeDuplicates.values()) {
-      if (duplicate.oldPeerId === peerId) return true;
-    }
-    return false;
+    if (this.book.remote(localPeerId) === undefined) return true; // host hasn't acknowledged us yet
+    return this.view.isHidden(localPeerId);
   }
 
   onChanged(handler: () => void): () => void {
@@ -317,6 +303,7 @@ export class PlayerReconnectionCoordinator {
 
   // ─── Incoming events ──────────────────────────────────────────────────────
 
+  // Branch order is load-bearing: see the pong comment.
   private handleEvent(event: PresenceEvent, from: SignalingPeerId): void {
     const hostPeerId = this.session.getHostPeerId();
     const localPeerId = this.session.getLocalPlayer()?.peerId;
@@ -349,7 +336,7 @@ export class PlayerReconnectionCoordinator {
     }
 
     if (event.t === "duplicate" && from === hostPeerId) {
-      this.registerActiveDuplicate(event.playerId, event.oldPeerId, event.newPeerId);
+      this.view.register(event.playerId, event.oldPeerId, event.newPeerId);
       this.changed.emit();
       return;
     }
@@ -363,7 +350,7 @@ export class PlayerReconnectionCoordinator {
     // before the host-only guards below, or every arbitration times out and a live old tab is
     // treated as a ghost.
     if (event.t === "pong") {
-      if (this.session.isHost()) this.handlePong(from, event.nonce);
+      if (this.session.isHost()) this.arbiter.handlePong(from, event.nonce);
       return;
     }
 
@@ -371,7 +358,7 @@ export class PlayerReconnectionCoordinator {
     if (from !== hostPeerId) return; // everything else is host-only
 
     if (event.t === "status") {
-      this.remotePresence = event.presence;
+      this.book.setRemote(event.presence);
       this.changed.emit();
     } else if (event.t === "restore") {
       this.session.updateLocalProfile({ metadata: event.metadata });
@@ -392,162 +379,67 @@ export class PlayerReconnectionCoordinator {
   // A guest just became host. It missed every join that happened before, so seed what it can
   // observe directly, then arbitrate duplicates that already exist.
   private onPromoted(): void {
+    this.armSelfRestore();
     const localPeerId = this.session.getLocalPlayer()?.peerId;
     for (const profile of this.session.getPlayers()) {
       if (profile.peerId === localPeerId) continue;
-      this.hostStatuses.set(
+      this.book.setStatus(
         profile.peerId,
         this.session.getPeerConnectionStatus(profile.peerId) ?? "connecting"
       );
     }
     this.syncAndBroadcast();
-    this.arbitrateExistingDuplicates();
+    this.arbiter.arbitrateExisting();
   }
 
   // Lost the host role: drop host-only bookkeeping. Guests learn presence from the new host.
   private onDemoted(): void {
-    for (const cancel of Array.from(this.linkWaits)) cancel();
-    this.linkWaits.clear();
-    for (const arbitration of this.pendingArbitrations.values()) arbitration.cancelTimeout();
-    this.pendingArbitrations.clear();
-    this.hostStatuses.clear();
-    this.returningPeerIds.clear();
+    this.arbiter.cancelAll();
+    this.book.clearHostState();
   }
 
-  // ─── Every peer: reacting to a duplicate-detected broadcast ───────────────
+  // ─── History ──────────────────────────────────────────────────────────────
 
-  private registerActiveDuplicate(
-    playerId: string,
-    oldPeerId: SignalingPeerId,
-    newPeerId: SignalingPeerId
+  private recall(playerId: string): Record<string, unknown> | undefined {
+    return findEntry(this.history.get(), playerId)?.metadata;
+  }
+
+  // Every peer reports a departure to the host: after a host change only the guests remember
+  // what the old host's profile looked like. Queued by the bus until a host link is up and held
+  // by a recovering host, so ordering with promotion needs no special handling here.
+  private rememberDeparture(
+    peerId: SignalingPeerId,
+    playerId: string | undefined,
+    metadata: Record<string, unknown>
   ): void {
-    if (this.activeDuplicates.has(playerId)) return;
-    const cancelSafety = this.clock.after(this.config.duplicateRevealTimeoutMs, () => {
-      // We never heard a definitive resolution (a dropped message, most likely): reveal
-      // whichever side is actually still present rather than hiding it forever.
-      this.activeDuplicates.delete(playerId);
-      const stillThere = this.session.getPlayers().some((p) => p.peerId === newPeerId);
-      if (stillThere) this.revealed.emit(newPeerId);
-      this.changed.emit();
+    if (playerId === undefined || peerId === this.session.getLocalPlayer()?.peerId) return;
+    void this.history.send("remember", { playerId, metadata: { ...metadata } }).then((result) => {
+      if (!result.ok) this.log.debug(`History entry not recorded: ${result.reason}`);
     });
-
-    this.activeDuplicates.set(playerId, { oldPeerId, newPeerId, cancelSafety });
   }
 
-  private resolveActiveDuplicate(departedPeerId: SignalingPeerId): void {
-    for (const [playerId, duplicate] of this.activeDuplicates) {
-      if (duplicate.oldPeerId !== departedPeerId && duplicate.newPeerId !== departedPeerId) {
-        continue;
-      }
-
-      duplicate.cancelSafety();
-      this.activeDuplicates.delete(playerId);
-
-      // The ghost (old) left and the newcomer survived: it was hidden this whole time and needs
-      // its join event fired now, for the first time.
-      if (duplicate.oldPeerId === departedPeerId) this.revealed.emit(duplicate.newPeerId);
-      this.changed.emit();
-      return;
-    }
+  private armSelfRestore(): void {
+    this.selfRestored = false;
+    this.selfRestoreUntil = this.clock.now() + this.config.linkWaitMs;
   }
 
-  // ─── Host-only arbitration ────────────────────────────────────────────────
-
-  // Arbitrates every playerId already present more than once. Waits for the data-channel links
-  // first: a ping sent before the link is active is silently dropped, which would make a live
-  // tab look like a ghost.
-  private arbitrateExistingDuplicates(): void {
-    const localPeerId = this.session.getLocalPlayer()?.peerId;
-
-    for (const group of findDuplicateGroups(this.session.getPlayers(), localPeerId)) {
-      this.afterLinksActive(group.involvedPeerIds, () => {
-        if (!this.session.isHost()) return;
-        const current = this.session.getPlayers().find((p) => p.peerId === group.newcomerPeerId);
-        if (current) this.arbitrateIfDuplicate(current);
-      });
-    }
+  // A host that just took the seat (a refreshed host reclaiming it) has no one to send it a
+  // restore. It reads its own entry from the replicated history, once, filling only the keys its
+  // profile lacks, so a promoted guest's current ready/team is never overwritten.
+  private tryRestoreSelf(): void {
+    if (this.selfRestored || !this.session.isHost()) return;
+    if (this.clock.now() > this.selfRestoreUntil) return;
+    const local = this.session.getLocalPlayer();
+    const playerId = local && readPlayerId(local.metadata);
+    if (!local || playerId === undefined) return;
+    const remembered = this.recall(playerId);
+    if (!remembered) return;
+    this.selfRestored = true;
+    const patch = missingKeys(remembered, local.metadata);
+    if (patch) this.session.updateLocalProfile({ metadata: patch });
   }
 
-  private afterLinksActive(peerIds: SignalingPeerId[], run: () => void): void {
-    const ready = () =>
-      peerIds.every((id) => this.session.getPeerConnectionStatus(id) === "active");
-    if (ready()) {
-      run();
-      return;
-    }
-
-    let finished = false;
-    const finish = () => {
-      if (finished) return;
-      finished = true;
-      off();
-      cancelTimer();
-      this.linkWaits.delete(cancel);
-      run();
-    };
-    const cancel = () => {
-      finished = true;
-      off();
-      cancelTimer();
-      this.linkWaits.delete(cancel);
-    };
-    const off = this.session.onPeerConnectionStatusChanged(() => {
-      if (ready()) finish();
-    });
-    const cancelTimer = this.clock.after(this.config.linkWaitMs, finish);
-    this.linkWaits.add(cancel);
-  }
-
-  private arbitrateIfDuplicate(newProfile: {
-    peerId: SignalingPeerId;
-    metadata: Record<string, unknown>;
-  }): void {
-    const localPeerId = this.session.getLocalPlayer()?.peerId;
-    // Never treat our own local join as "the newcomer": the host-refreshes-itself case is handled
-    // by dead-host detection and the returning-player restore, not this path.
-    if (newProfile.peerId === localPeerId) return;
-
-    const playerId = readPlayerId(newProfile.metadata);
-    if (!playerId) return;
-    if (this.pendingArbitrations.has(playerId)) return; // one arbitration at a time per playerId
-
-    const existing = findExistingDuplicate(this.session.getPlayers(), newProfile, playerId);
-    if (!existing) return;
-
-    this.broadcastDuplicateDetected(playerId, existing.peerId, newProfile.peerId);
-
-    if (planArbitration(existing.peerId, localPeerId) === "reject-newcomer") {
-      this.reject(newProfile.peerId); // the host's own tab is trivially alive: no ping needed
-      return;
-    }
-
-    const nonce = this.ids.next();
-    const cancelTimeout = this.clock.after(this.config.pingTimeoutMs, () => {
-      const pending = this.pendingArbitrations.get(playerId);
-      if (!pending || pending.nonce !== nonce) return; // already resolved by a pong
-      this.pendingArbitrations.delete(playerId);
-      this.reject(pending.oldPeerId); // no reply in time: treat as a ghost
-    });
-
-    this.pendingArbitrations.set(playerId, {
-      nonce,
-      oldPeerId: existing.peerId,
-      newPeerId: newProfile.peerId,
-      cancelTimeout,
-    });
-
-    this.channel.sendTo(existing.peerId, { t: "ping", nonce });
-  }
-
-  private handlePong(fromPeerId: SignalingPeerId, nonce: string): void {
-    for (const [playerId, pending] of this.pendingArbitrations) {
-      if (pending.oldPeerId !== fromPeerId || pending.nonce !== nonce) continue;
-      pending.cancelTimeout();
-      this.pendingArbitrations.delete(playerId);
-      this.reject(pending.newPeerId); // pre-existing connection answered: genuinely alive
-      return;
-    }
-  }
+  // ─── Host-side actions ────────────────────────────────────────────────────
 
   private reject(peerId: SignalingPeerId, notice: "rejected" | "kicked" = "rejected"): void {
     this.log.debug(`Removing peer=${shortId(peerId)} (${notice})`);
@@ -564,7 +456,7 @@ export class PlayerReconnectionCoordinator {
     newPeerId: SignalingPeerId
   ): void {
     this.channel.broadcast({ t: "duplicate", playerId, oldPeerId, newPeerId });
-    this.registerActiveDuplicate(playerId, oldPeerId, newPeerId);
+    this.view.register(playerId, oldPeerId, newPeerId);
     this.changed.emit();
   }
 
@@ -578,27 +470,14 @@ export class PlayerReconnectionCoordinator {
 
   private sendStatusTo(peerId: SignalingPeerId): void {
     // A promoted host may not have observed this guest yet; make sure the reply includes it.
-    if (!this.hostStatuses.has(peerId)) {
-      this.hostStatuses.set(peerId, this.session.getPeerConnectionStatus(peerId) ?? "connecting");
+    if (!this.book.has(peerId)) {
+      this.book.setStatus(peerId, this.session.getPeerConnectionStatus(peerId) ?? "connecting");
     }
-    this.channel.sendTo(peerId, { t: "status", presence: this.buildPresenceMap() });
-  }
-
-  private buildPresenceMap(): PresenceMap {
-    const presence: PresenceMap = {};
-    for (const [peerId, status] of this.hostStatuses) {
-      presence[peerId] = { status, returning: this.returningPeerIds.has(peerId) };
-    }
-    return presence;
+    this.channel.sendTo(peerId, { t: "status", presence: this.book.buildMap() });
   }
 
   private syncAndBroadcast(): void {
-    this.channel.broadcast({ t: "status", presence: this.buildPresenceMap() });
+    this.channel.broadcast({ t: "status", presence: this.book.buildMap() });
     this.changed.emit();
-  }
-
-  private findSurvivorReplacing(departedPeerId: SignalingPeerId): SignalingPeerId | undefined {
-    const present = new Set(this.session.getPlayers().map((p) => p.peerId));
-    return findSurvivor(this.activeDuplicates.values(), departedPeerId, present);
   }
 }

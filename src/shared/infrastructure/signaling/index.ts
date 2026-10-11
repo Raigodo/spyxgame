@@ -12,6 +12,7 @@ export { HostElectionService } from "./host-election-service";
 export type { HostDocument, HostElectionPort } from "./ports/host-election-port";
 export type { RoomMembershipPort } from "./ports/room-membership-port";
 export type { SignalInboxPort } from "./ports/signal-inbox-port";
+export type { RemovalReason } from "./peer-remover";
 
 export function createSignalingSession(
   overrides: Partial<SignalingSessionDeps> = {}

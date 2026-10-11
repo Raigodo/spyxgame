@@ -1,6 +1,8 @@
 import type { Unsubscribe } from "@/shared/kernel";
 import type { RoomId, SignalingPeerId } from "../types";
 
+export type CandidateStage = "registered" | "confirmed";
+
 export interface HostDocument {
   signalingPeerId: SignalingPeerId;
 }
@@ -12,15 +14,24 @@ export interface HostElectionPort {
   clearHost(roomId: RoomId): Promise<void>;
   subscribeToHost(roomId: RoomId, onChange: (host: HostDocument | null) => void): Unsubscribe;
 
-  /** Doc id is the candidate's own peer id, so a later death overwrites the earlier registration. */
+  /**
+   * Doc id is the candidate's own peer id, so a later death overwrites the earlier registration.
+   * "registered" = I suspect the host is dead. "confirmed" = the window ended and I am still
+   * alive and still want the seat; only confirmed candidates are ever elected.
+   */
   registerCandidate(
     roomId: RoomId,
     peerId: SignalingPeerId,
-    deadHostPeerId: SignalingPeerId
+    deadHostPeerId: SignalingPeerId,
+    stage: CandidateStage
   ): Promise<void>;
   removeCandidate(roomId: RoomId, peerId: SignalingPeerId): Promise<void>;
   /** One-shot read, so every client calling it around the same time sees the same snapshot. */
-  listCandidates(roomId: RoomId, deadHostPeerId: SignalingPeerId): Promise<SignalingPeerId[]>;
+  listCandidates(
+    roomId: RoomId,
+    deadHostPeerId: SignalingPeerId,
+    stage?: CandidateStage
+  ): Promise<SignalingPeerId[]>;
   clearAllCandidates(roomId: RoomId): Promise<void>;
 
   /** Atomic: writes the host only if the document still names `expectedPeerId`. */

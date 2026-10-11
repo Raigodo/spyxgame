@@ -4,6 +4,7 @@ import type { RtcConnectionProvider } from "./ports/rtc-connection-provider";
 import { RtcLinkNegotiator } from "./rtc-link-negotiator";
 import type { RtcPeerRegistry } from "./rtc-peer-registry";
 import type { PeerEntry } from "./types";
+import { RtcSignal } from "./rtc-signal";
 
 export interface RtcPeerLinkFactoryDeps {
   signaling: SignalingSession;
@@ -36,7 +37,11 @@ export class RtcPeerLinkFactory {
       if (isLeaving()) return;
       logger.debug(`ICE candidate for peer=${peer}`);
       void signaling
-        .sendIceCandidate(signalingPeerId, candidate, isHost() ? "remove" : "do-nothing")
+        .sendSignal(
+          signalingPeerId,
+          { type: "ice-candidate", candidate } satisfies RtcSignal,
+          isHost() ? "remove" : "do-nothing"
+        )
         .catch(this.logSendFailure("ICE candidate", signalingPeerId));
     });
 
@@ -44,7 +49,11 @@ export class RtcPeerLinkFactory {
       if (isLeaving()) return;
       logger.debug(`Answer created for peer=${peer}`);
       void signaling
-        .sendAnswer(signalingPeerId, answer.sdp, "do-nothing")
+        .sendSignal(
+          signalingPeerId,
+          { type: "answer", sdp: answer.sdp } satisfies RtcSignal,
+          "do-nothing"
+        )
         .catch(this.logSendFailure("answer", signalingPeerId));
     });
 
@@ -76,7 +85,12 @@ export class RtcPeerLinkFactory {
       if (isLeaving()) return;
       logger.debug(`Offer created for peer=${shortId(signalingPeerId)}`);
       void signaling
-        .sendOffer(signalingPeerId, offer.sdp, isHost() ? "remove" : "do-nothing")
+        .sendSignal(
+          signalingPeerId,
+          { type: "offer", sdp: offer.sdp } satisfies RtcSignal,
+          isHost() ? "remove" : "do-nothing",
+          { requireMember: true }
+        )
         .catch(this.logSendFailure("offer", signalingPeerId));
     });
 

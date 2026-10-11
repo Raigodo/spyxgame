@@ -7,6 +7,7 @@ import type {
 import type { Unsubscribe } from "@/shared/kernel";
 import { FakeFirestoreState } from "./fake-firestore-state";
 import { FakePortLife } from "./fake-port-life";
+import { CandidateStage } from "../infrastructure/signaling/ports/host-election-port";
 
 export class FakeHostElection implements HostElectionPort {
   constructor(
@@ -46,11 +47,15 @@ export class FakeHostElection implements HostElectionPort {
   registerCandidate(
     roomId: RoomId,
     peerId: SignalingPeerId,
-    deadHostPeerId: SignalingPeerId
+    deadHostPeerId: SignalingPeerId,
+    stage: CandidateStage
   ): Promise<void> {
     return this.life.run(() => {
       this.state.stats.writes++;
-      this.state.room(roomId).candidates.set(peerId, deadHostPeerId);
+      this.state.room(roomId).candidates.set(peerId, {
+        dead: deadHostPeerId,
+        confirmed: stage === "confirmed",
+      });
     });
   }
 
@@ -61,12 +66,16 @@ export class FakeHostElection implements HostElectionPort {
     });
   }
 
-  listCandidates(roomId: RoomId, deadHostPeerId: SignalingPeerId): Promise<SignalingPeerId[]> {
+  listCandidates(
+    roomId: RoomId,
+    deadHostPeerId: SignalingPeerId,
+    stage?: CandidateStage
+  ): Promise<SignalingPeerId[]> {
     return this.life.run(() => {
       const all = this.state.room(roomId).candidates;
       this.state.stats.reads += Math.max(1, all.size);
       return Array.from(all)
-        .filter(([, dead]) => dead === deadHostPeerId)
+        .filter(([, c]) => c.dead === deadHostPeerId && (stage !== "confirmed" || c.confirmed))
         .map(([peerId]) => peerId);
     });
   }

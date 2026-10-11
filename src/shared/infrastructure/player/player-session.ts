@@ -6,13 +6,13 @@ import {
   type ThrottledWarn,
 } from "@/shared/kernel";
 import type { RoomId, SignalingPeerId } from "../signaling";
-import type {
-  ChunkedMessenger,
-  FormerHost,
-  HostTransferResult,
-  RtcPeer,
-  RtcPeerStatus,
-  RtcTransport,
+import {
+  type ChunkedMessenger,
+  type FormerHost,
+  type HostTransferResult,
+  type RtcPeer,
+  type RtcPeerStatus,
+  type RtcTransport,
 } from "../webrtc";
 import { parseEnvelope, type Envelope } from "./envelope-parser";
 import { PlayerDirectory } from "./player-directory";

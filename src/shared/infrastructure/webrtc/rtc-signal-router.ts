@@ -1,6 +1,7 @@
 import { shortId, type Logger } from "@/shared/kernel";
-import type { SignalingPeerId, WebRtcSignal } from "../signaling";
+import type { SignalingPeerId } from "../signaling";
 import type { IceCandidate } from "./ports/rtc-peer-connection-port";
+import type { RtcSignal } from "./rtc-signal";
 import type { RtcPeerLinkFactory } from "./rtc-peer-link-factory";
 import type { RtcPeerRegistry } from "./rtc-peer-registry";
 
@@ -14,7 +15,7 @@ export interface RtcSignalRouterDeps {
 export class RtcSignalRouter {
   constructor(private readonly deps: RtcSignalRouterDeps) {}
 
-  async handle(from: SignalingPeerId, signal: WebRtcSignal): Promise<void> {
+  async handle(from: SignalingPeerId, signal: RtcSignal): Promise<void> {
     this.deps.logger.debug(`Signal from peer=${shortId(from)} type=${signal.type}`);
 
     switch (signal.type) {
@@ -27,8 +28,10 @@ export class RtcSignalRouter {
       case "ice-candidate":
         await this.handleIceCandidate(from, signal.candidate);
         break;
-      default:
-        this.deps.logger.warn(`Unknown signal type from peer=${shortId(from)}`);
+      default: {
+        const unknownSignal: never = signal;
+        this.deps.logger.warn(`Unknown signal type from peer=${shortId(from)}`, unknownSignal);
+      }
     }
   }
 

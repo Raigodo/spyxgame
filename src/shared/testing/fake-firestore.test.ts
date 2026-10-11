@@ -56,9 +56,17 @@ describe("fake Firestore ports", () => {
 
   it("election: candidates are scoped to one dead host", async () => {
     const election = new FakeHostElection(new FakeFirestoreState());
-    await election.registerCandidate("r", "b", "dead1");
-    await election.registerCandidate("r", "c", "dead2");
+    await election.registerCandidate("r", "b", "dead1", "registered");
+    await election.registerCandidate("r", "c", "dead2", "registered");
     expect(await election.listCandidates("r", "dead1")).toEqual(["b"]);
+  });
+
+  it("election: only confirmed candidates are listed when asked", async () => {
+    const election = new FakeHostElection(new FakeFirestoreState());
+    await election.registerCandidate("r", "b", "dead", "registered");
+    await election.registerCandidate("r", "c", "dead", "confirmed");
+    expect(await election.listCandidates("r", "dead")).toEqual(["b", "c"]);
+    expect(await election.listCandidates("r", "dead", "confirmed")).toEqual(["c"]);
   });
 
   it("counts reads, writes and deletes", async () => {

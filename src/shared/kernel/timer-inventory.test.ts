@@ -38,7 +38,10 @@ describe("timer relations", () => {
 
   it("commands outlive a failover", () => {
     const failoverBudgetMs =
-      signaling.candidateCollectionWindowMs + 2 * signaling.positionIntervalMs + bus.recoveryMaxMs;
+      signaling.candidateCollectionWindowMs +
+      signaling.candidateConfirmWindowMs +
+      2 * signaling.positionIntervalMs +
+      bus.recoveryMaxMs;
     expect(bus.commandTtlMs).toBeGreaterThan(failoverBudgetMs);
   });
   it("the duplicate reveal safety waits for the ping to time out", () => {

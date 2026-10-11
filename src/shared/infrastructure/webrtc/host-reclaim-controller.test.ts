@@ -55,7 +55,7 @@ describe("HostReclaimController", () => {
     const { controller, claimHost, removePeer } = setup(["claimed"]);
     controller.start({ peerId: "old", confirmedGone: true });
     await nextMacrotask();
-    expect(removePeer).toHaveBeenCalledWith("old");
+    expect(removePeer).toHaveBeenCalledWith("old", "reclaim");
     expect(claimHost).toHaveBeenCalledTimes(1);
     expect(controller.former).toBeUndefined();
   });

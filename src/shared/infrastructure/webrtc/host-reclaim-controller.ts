@@ -82,7 +82,7 @@ export class HostReclaimController {
 
     if (former.confirmedGone) {
       void session
-        .removePeer(formerId)
+        .removePeer(formerId, "reclaim")
         .catch((error) => logger.warn("Failed to remove former host", error))
         .then(() => attempt(false));
     } else {
