@@ -79,7 +79,7 @@ export const DEFAULT_CONFIG: AppConfig = {
       { urls: "stun:stun.l.google.com:19302" },
       { urls: "stun:stun1.l.google.com:19302" },
     ],
-    offerTimeoutMs: 5_000,
+    offerTimeoutMs: 12_000,
     reconnectTimeoutMs: 5_000,
     reclaimWindowMs: 10_000,
     iceBatchWindowMs: 300,

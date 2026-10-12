@@ -3,11 +3,12 @@
 import Link from "next/link";
 import { useEffect, useState, type ReactNode } from "react";
 import { useParams, useSearchParams } from "next/navigation";
-import { createMultiplayerClient } from "@/shared/application/room";
+import { createMultiplayerClient, type MultiplayerClient } from "@/shared/application/room";
 import { GAMES } from "./games";
 import { RoomContext, useRoom, type RoomContextValue } from "./room-context";
 import { usePhase, useRoomStatus } from "./room-hooks";
 import { installDebugHook } from "./debug-hook";
+import { configWithIceServers, fetchIceServers } from "./ice-servers";
 import { RoomNavigator } from "./room-navigator";
 
 // Pages keep importing useRoom from here.
@@ -60,18 +61,34 @@ export function RoomProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     let cancelled = false;
-    const client = createMultiplayerClient({ games: GAMES });
-    // Subscribed before joining, so a supersede during the join is never missed.
-    const offSuperseded = client.onSuperseded(() => setSuperseded(true));
-    const offKicked = client.onKicked(() => setKicked(true));
-    const offDebug = process.env.NODE_ENV === "production" ? () => {} : installDebugHook(client);
+    let client: MultiplayerClient | undefined;
+    let unsubscribers: Array<() => void> = [];
 
     // Deferred a tick so React StrictMode's mount → cleanup → mount in dev
     // never starts two joins with the same playerId (which would trigger
     // duplicate-session arbitration against yourself).
     const timer = setTimeout(async () => {
+      // Relay servers first: the client reads its ICE servers when it is created.
+      const iceServers = await fetchIceServers();
+      if (cancelled) return;
+
+      const created = createMultiplayerClient(
+        { games: GAMES },
+        { config: configWithIceServers(iceServers) }
+      );
+      client = created;
+      // Subscribed before joining, so a supersede during the join is never missed.
+      unsubscribers = [
+        created.onSuperseded(() => setSuperseded(true)),
+        created.onKicked(() => setKicked(true)),
+        process.env.NODE_ENV === "production" ? () => {} : installDebugHook(created),
+      ];
+
       try {
-        const { playerId, generated } = await client.join({ roomId, playerId: initialPlayerId });
+        const { playerId, generated } = await created.join({
+          roomId,
+          playerId: initialPlayerId,
+        });
         if (cancelled) return;
 
         if (generated) {
@@ -81,7 +98,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
         }
 
         setValue({
-          client,
+          client: created,
           roomId,
           playerId,
           roomHref: (sub = "") => `/room/${roomId}${sub}?playerId=${playerId}`,
@@ -94,14 +111,12 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
       clearTimeout(timer);
-      offSuperseded();
-      offKicked();
-      offDebug();
+      for (const off of unsubscribers) off();
       setKicked(false);
       setValue(null);
       setError(null);
       setSuperseded(false);
-      void client.leave(); // idempotent; safe if the join never started
+      void client?.leave(); // idempotent; safe if the join never started
     };
   }, [roomId, initialPlayerId]);
 
