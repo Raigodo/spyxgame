@@ -57,7 +57,7 @@ kernel -> infrastructure (signaling, webrtc, player) -> application (messaging, 
 
 ## Adding things
 
-- **A game:** one `defineGame` definition, one `{definition, route}` entry in `presentation/room/games.ts`, one page. Never touch networking.
+- **A game:** one `defineGame` definition, one `{definition, route}` entry in `presentation/room/games.ts`, one lobby entry in `presentation/room/lobby-games.ts` (label, modes, a `Starter` component with its config inputs), one page. Never touch networking.
 - **A bus wire kind:** extend `Wire` and `parseWire`, add its handler to `wireHandlers` (the compiler requires it).
 - **A presence event:** extend `PresenceEvent` and its parser, handle it in `handleEvent`, keeping the branch order (pong before the host-only guards). Anything that must survive a host change goes in `presence:history` or a new state channel.
 - **A port:** interface in `ports/`, adapter in `adapters/`, injected through the owner's deps, default wired in the layer's `index.ts`, override in `createMultiplayerClient`, a fake for tests.

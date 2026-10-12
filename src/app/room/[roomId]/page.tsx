@@ -11,8 +11,8 @@ import {
   usePlayers,
   useRoomStatus,
 } from "@/shared/presentation/room/room-hooks";
+import { LOBBY_GAMES } from "@/shared/presentation/room/lobby-games";
 import { useRoom } from "@/shared/presentation/room/room-provider";
-import { demoTap } from "@/demo-tap/demo-tap";
 
 function statusStyles(status: string): string {
   switch (status) {
@@ -40,12 +40,15 @@ export default function LobbyPage() {
 
   const [nickname, setNickname] = useState("");
   const [teamIdsInput, setTeamIdsInput] = useState("red,blue");
-  const [goalInput, setGoalInput] = useState("20");
+  const [selectedGameId, setSelectedGameId] = useState<string>();
   const [notice, setNotice] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
   const localPeerId = client.getLocalPeerId();
   const local = players.find((p) => p.peerId === localPeerId);
+  // Only games that support the current lobby mode are offered. A stale choice falls back to the first.
+  const availableGames = LOBBY_GAMES.filter((g) => g.modes.includes(lobby.mode));
+  const selectedGame = availableGames.find((g) => g.id === selectedGameId) ?? availableGames[0];
 
   function report(result: CommandResult) {
     setNotice(result.ok ? null : `Rejected: ${result.reason}`);
@@ -253,22 +256,29 @@ export default function LobbyPage() {
         </section>
 
         {isHost ? (
-          <div className="flex items-center gap-2">
-            <label className="text-slate-500">Goal</label>
-            <input
-              className="bg-slate-900 px-2 py-1 border border-slate-700 rounded w-20"
-              value={goalInput}
-              onChange={(e) => setGoalInput(e.target.value)}
-            />
-            <button
-              className="bg-emerald-700 hover:bg-emerald-600 px-4 py-2 rounded font-semibold"
-              onClick={() =>
-                void client.startGame(demoTap, { goal: Number(goalInput) }).then(report)
-              }
+          <section className="flex flex-wrap items-center gap-2">
+            <label className="text-slate-500" htmlFor="game-select">
+              Game
+            </label>
+            <select
+              id="game-select"
+              disabled={syncing || availableGames.length === 0}
+              className="bg-slate-900 px-2 py-1.5 border border-slate-700 rounded"
+              value={selectedGame?.id ?? ""}
+              onChange={(e) => setSelectedGameId(e.target.value)}
             >
-              Start tap race
-            </button>
-          </div>
+              {availableGames.map((g) => (
+                <option key={g.id} value={g.id}>
+                  {g.label}
+                </option>
+              ))}
+            </select>
+            {selectedGame ? (
+              <selectedGame.Starter key={selectedGame.id} disabled={syncing} onResult={report} />
+            ) : (
+              <span className="text-slate-500">No game supports {lobby.mode} mode.</span>
+            )}
+          </section>
         ) : (
           <p className="text-slate-500">Waiting for the host to start…</p>
         )}
