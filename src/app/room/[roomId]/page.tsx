@@ -5,6 +5,7 @@ import type { CommandResult } from "@/shared/application/messaging";
 import { ChatPanel } from "@/shared/presentation/room/chat-panel";
 import {
   useIsHost,
+  useLastGame,
   useLobby,
   usePending,
   usePhase,
@@ -37,6 +38,7 @@ export default function LobbyPage() {
   const isHost = useIsHost();
   const pending = usePending();
   const syncing = useRoomStatus() !== "ready";
+  const lastGame = useLastGame();
 
   const [nickname, setNickname] = useState("");
   const [teamIdsInput, setTeamIdsInput] = useState("red,blue");
@@ -48,7 +50,8 @@ export default function LobbyPage() {
   const local = players.find((p) => p.peerId === localPeerId);
   // Only games that support the current lobby mode are offered. A stale choice falls back to the first.
   const availableGames = LOBBY_GAMES.filter((g) => g.modes.includes(lobby.mode));
-  const selectedGame = availableGames.find((g) => g.id === selectedGameId) ?? availableGames[0];
+  const selectedGame =
+    availableGames.find((g) => g.id === (selectedGameId ?? lastGame?.id)) ?? availableGames[0];
 
   function report(result: CommandResult) {
     setNotice(result.ok ? null : `Rejected: ${result.reason}`);
@@ -274,7 +277,12 @@ export default function LobbyPage() {
               ))}
             </select>
             {selectedGame ? (
-              <selectedGame.Starter key={selectedGame.id} disabled={syncing} onResult={report} />
+              <selectedGame.Starter
+                key={selectedGame.id}
+                disabled={syncing}
+                onResult={report}
+                initialConfig={lastGame?.id === selectedGame.id ? lastGame.config : undefined}
+              />
             ) : (
               <span className="text-slate-500">No game supports {lobby.mode} mode.</span>
             )}

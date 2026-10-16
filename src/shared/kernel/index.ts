@@ -18,6 +18,7 @@ export type {
   ProfileConfig,
   SignalingConfig,
   WebRtcConfig,
+  GameConfig,
 } from "./config";
 export { Countdown } from "./countdown";
 export { shortId } from "./short-id";

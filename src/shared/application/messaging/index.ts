@@ -14,3 +14,10 @@ export type {
   StateChannelOptions,
 } from "./types";
 // CommandQueue and wire parsing stay internal.
+export { PrivateChannel } from "./private-channel";
+export type {
+  PrivateChannelOptions,
+  PrivateView,
+  PrivateWrite,
+  SlotRevisions,
+} from "./private-channel";

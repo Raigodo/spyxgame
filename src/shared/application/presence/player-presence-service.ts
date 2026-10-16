@@ -37,6 +37,7 @@ export class PlayerPresenceService {
   private readonly rejoined = new Emitter<RosterPlayer>(this.onListenerError);
   private readonly updated = new Emitter<RosterPlayer>(this.onListenerError);
   private readonly left = new Emitter<RosterPlayer>(this.onListenerError);
+  private readonly removed = new Emitter<string>(this.onListenerError);
   private readonly cleanupFns: Array<() => void> = [];
 
   constructor(deps: PlayerPresenceServiceDeps) {
@@ -83,6 +84,7 @@ export class PlayerPresenceService {
         const ghost = this.ghosts.drop(playerId);
         if (ghost) this.left.emit(ghost);
         else this.ghosts.announceRemoval(playerId);
+        this.removed.emit(playerId);
       }),
 
       // Connection status and returning flips don't flow through PlayerSession's profile events,
@@ -101,6 +103,7 @@ export class PlayerPresenceService {
     for (const cleanup of this.cleanupFns) cleanup();
     this.cleanupFns.length = 0;
     this.ghosts.dispose();
+    this.removed.clear();
     this.reconnection.dispose();
   }
 
@@ -191,6 +194,11 @@ export class PlayerPresenceService {
   /** Fires on the player the host removed. */
   onKicked(handler: () => void): () => void {
     return this.reconnection.onKicked(handler);
+  }
+
+  /** Fires on every peer, with the playerId, when the host removed a player on purpose (kick or ban). */
+  onPlayerRemoved(handler: (playerId: string) => void): () => void {
+    return this.removed.on(handler);
   }
 
   // ─── Visibility and ghosts ────────────────────────────────────────────────

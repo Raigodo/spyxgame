@@ -1,4 +1,4 @@
-import { type IdGenerator, type Logger } from "@/shared/kernel";
+import { Clock, type IdGenerator, type Logger } from "@/shared/kernel";
 import { ActiveRtcConnection } from "./active-rtc-connection";
 import type { RtcDataChannelPort } from "./ports/rtc-data-channel-port";
 import type {
@@ -11,6 +11,8 @@ export interface RtcLinkNegotiatorDeps {
   connection: RtcPeerConnectionPort;
   ids: IdGenerator;
   logger: Logger;
+  clock: Clock;
+  disconnectGraceMs: number;
 }
 
 // Negotiates ONE link: offer/answer/ICE, then hands over an ActiveRtcConnection once the data
@@ -129,7 +131,7 @@ export class RtcLinkNegotiator {
   }
 
   private attachDataChannelHandlers(channel: RtcDataChannelPort): void {
-    const { connection, ids, logger } = this.deps;
+    const { connection, ids, logger, clock, disconnectGraceMs } = this.deps;
 
     channel.onOpen(() => {
       logger.debug("Data channel open, handing off ActiveRtcConnection");
@@ -138,6 +140,8 @@ export class RtcLinkNegotiator {
         channel,
         ids,
         logger: logger.child("active"),
+        clock,
+        disconnectGraceMs,
       });
       this.connectedHandler?.(active);
     });

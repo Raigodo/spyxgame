@@ -24,6 +24,11 @@ import {
   type ThrottledWarn,
 } from "@/shared/kernel";
 import { computeBusStatus } from "./bus-rules";
+import {
+  PrivateChannel,
+  type BusPrivateChannel,
+  type PrivateChannelOptions,
+} from "./private-channel";
 
 /** One handler per wire kind. A new kind in `Wire` does not compile until it has one here. */
 type WireHandlers = { [K in Wire["kind"]]: (w: Extract<Wire, { kind: K }>, from: PeerId) => void };
@@ -41,6 +46,7 @@ export class RoomBus {
   private readonly options: BusOptions;
   private readonly stateChannels = new Map<string, BusStateChannel>();
   private readonly eventChannels = new Map<string, BusEventChannel>();
+  private readonly privateChannels = new Map<string, BusPrivateChannel>();
   private readonly queue: CommandQueue;
   private readonly statusChanged = new Emitter<BusStatus>();
   private readonly cleanups: Array<() => void> = [];
@@ -89,6 +95,15 @@ export class RoomBus {
       throw new Error(`[RoomBus] Duplicate channel "${opts.id}".`);
     const channel = new EventChannel<E>(this.channelHost, opts.id, opts);
     this.eventChannels.set(opts.id, channel);
+    return channel;
+  }
+
+  /** Per-player values only their owner sees. Register before start(). */
+  privateChannel<H>(opts: PrivateChannelOptions<H>): PrivateChannel<H> {
+    if (this.privateChannels.has(opts.id))
+      throw new Error(`[RoomBus] Duplicate channel "${opts.id}".`);
+    const channel = new PrivateChannel<H>(this.channelHost, opts.id, opts);
+    this.privateChannels.set(opts.id, channel);
     return channel;
   }
 
@@ -143,6 +158,7 @@ export class RoomBus {
         Array.from(this.stateChannels, ([id, channel]) => [id, channel.inspect()])
       ),
       eventChannels: Array.from(this.eventChannels.keys()),
+      privateChannels: Array.from(this.privateChannels.keys()),
     };
   }
 
@@ -196,6 +212,14 @@ export class RoomBus {
       if (!this.transport.isHost() && from === this.transport.getHostPeerId()) {
         this.syncWithHost();
       }
+    },
+    private: (w, from) => {
+      if (from !== this.transport.getHostPeerId() || this.transport.isHost()) return;
+      this.privateChannels.get(w.ch)?.receivePiece(w);
+      this.refreshStatus();
+    },
+    mine: (w, from) => {
+      if (this.transport.isHost()) this.privateChannels.get(w.ch)?.receiveOffer(from, w);
     },
   };
 
@@ -251,7 +275,10 @@ export class RoomBus {
     if (promoted) this.deps.logger.debug("Promoted to host", { host: hostId });
     if (demoted) this.deps.logger.debug("Demoted to guest", { host: hostId });
 
-    if (demoted) this.endRecovery();
+    if (demoted) {
+      this.endRecovery();
+      for (const channel of this.privateChannels.values()) channel.pruneToOwn();
+    }
     if (promoted) this.beginRecovery();
     if (!iAmHost) {
       if (hostMoved || demoted) {
@@ -267,7 +294,10 @@ export class RoomBus {
   private handleLinkActive(peerId: PeerId): void {
     if (this.transport.isHost()) {
       if (this.recovery) this.recovery.noteActivity();
-      else for (const channel of this.stateChannels.values()) channel.sendSnapshot(peerId);
+      else {
+        for (const channel of this.stateChannels.values()) channel.sendSnapshot(peerId);
+        for (const channel of this.privateChannels.values()) channel.onLinkActive(peerId);
+      }
     } else if (peerId === this.transport.getHostPeerId()) {
       this.syncWithHost();
     }
@@ -278,6 +308,9 @@ export class RoomBus {
   private syncWithHost(): void {
     const hostId = this.transport.getHostPeerId();
     if (!hostId || this.transport.isHost() || !this.transport.isLinkActive(hostId)) return;
+    // Our pieces go first: the host's recovery finishes on the state offers, and must already
+    // have every piece by then (the link is ordered).
+    for (const channel of this.privateChannels.values()) channel.offerTo(hostId);
     const channels = Array.from(this.stateChannels.values(), (c) => c.copy());
     this.transport.send(hostId, { __bus: 1, kind: "offer", channels });
     this.requestMissingSnapshots(hostId);
@@ -290,6 +323,9 @@ export class RoomBus {
       if (!channel.isSynced())
         this.transport.send(hostId, { __bus: 1, kind: "sync", ch: channel.id });
     }
+    for (const channel of this.privateChannels.values()) {
+      if (!channel.isSynced()) channel.offerTo(hostId); // also asks the host to send it again
+    }
   }
 
   private updateResync(): void {
@@ -299,7 +335,8 @@ export class RoomBus {
       !this.transport.isHost() &&
       !!hostId &&
       this.transport.isLinkActive(hostId) &&
-      Array.from(this.stateChannels.values()).some((c) => !c.isSynced());
+      (Array.from(this.stateChannels.values()).some((c) => !c.isSynced()) ||
+        Array.from(this.privateChannels.values()).some((c) => !c.isSynced()));
 
     if (needed && !this.cancelResync) {
       this.cancelResync = this.deps.clock.every(this.options.resyncIntervalMs, () => {
@@ -390,6 +427,7 @@ export class RoomBus {
       if (offered) channel.adoptIfNewer(offered);
       channel.promote();
     }
+    for (const channel of this.privateChannels.values()) channel.acceptOffers();
     for (const { w, from } of result.held) this.processRemoteCommand(w, from);
     this.flushQueue();
     this.refreshStatus();

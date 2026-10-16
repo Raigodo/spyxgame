@@ -17,6 +17,8 @@ import {
   applyVote,
   initialSpyState,
   MIN_SPY_PLAYERS,
+  settle,
+  settleState,
   type SpyState,
 } from "./spy-rules";
 import {
@@ -49,6 +51,16 @@ export const spyGame = defineGame<
   validateState: validateSpyState,
   initialState: () => initialSpyState(),
 
+  // Away players are skipped and not waited for. Below 3 present players the game pauses.
+  presence: {
+    minPresent: MIN_SPY_PLAYERS,
+    belowMin: "pause",
+    onChange: ({ state, away }) => {
+      const next = settleState(state, away);
+      return next === state ? undefined : next;
+    },
+  },
+
   commands: {
     addWord: {
       validate: parseAddWord,
@@ -63,25 +75,28 @@ export const spyGame = defineGame<
     begin: {
       allow: "host",
       validate: parseBegin,
-      reduce: ({ state, payload, config, context }) =>
-        applyBegin(state, context.participants, payload.seed, config.minWords),
+      reduce: ({ state, payload, config, context, away }) =>
+        settle(applyBegin(state, context.participants, payload.seed, config.minWords), away),
     },
     endTurn: {
       validate: parseNoPayload,
-      reduce: ({ state, sender }) => applyEndTurn(state, { playerId: sender.playerId }),
+      reduce: ({ state, sender, away }) =>
+        settle(applyEndTurn(state, { playerId: sender.playerId }), away),
     },
     skipTurn: {
       allow: "host",
       validate: parseNoPayload,
-      reduce: ({ state }) => applyEndTurn(state, "host"),
+      reduce: ({ state, away }) => settle(applyEndTurn(state, "host"), away),
     },
     decide: {
       validate: parseDecide,
-      reduce: ({ state, payload, sender }) => applyDecide(state, sender.playerId, payload.choice),
+      reduce: ({ state, payload, sender, away }) =>
+        settle(applyDecide(state, sender.playerId, payload.choice), away),
     },
     vote: {
       validate: parseVote,
-      reduce: ({ state, payload, sender }) => applyVote(state, sender.playerId, payload.target),
+      reduce: ({ state, payload, sender, away }) =>
+        settle(applyVote(state, sender.playerId, payload.target), away),
     },
     claimWord: {
       validate: parseNoPayload,
@@ -89,8 +104,8 @@ export const spyGame = defineGame<
     },
     claimVote: {
       validate: parseClaimVote,
-      reduce: ({ state, payload, sender }) =>
-        applyClaimVote(state, sender.playerId, payload.correct),
+      reduce: ({ state, payload, sender, away }) =>
+        settle(applyClaimVote(state, sender.playerId, payload.correct), away),
     },
     giveUp: {
       validate: parseNoPayload,
@@ -99,7 +114,7 @@ export const spyGame = defineGame<
     forceAdvance: {
       allow: "host",
       validate: parseNoPayload,
-      reduce: ({ state }) => applyForceAdvance(state),
+      reduce: ({ state, away }) => settle(applyForceAdvance(state), away),
     },
   },
 

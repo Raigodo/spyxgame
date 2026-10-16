@@ -32,6 +32,8 @@ export interface AppConfig {
     /** The host pings a link with no inbound traffic this long; no answer within the timeout means dead. */
     probeIdleMs: number;
     probeTimeoutMs: number;
+    /** A link reported "disconnected" gets this long to heal on its own before it counts as dead. */
+    disconnectGraceMs: number;
   };
   bus: {
     commandTtlMs: number;
@@ -48,6 +50,12 @@ export interface AppConfig {
     linkWaitMs: number;
     /** How long a departed player stays visible as "reconnecting". */
     departureGraceMs: number;
+  };
+  game: {
+    /** A participant missing from the roster this long is marked away (host side). A game may override it. */
+    awayAfterMs: number;
+    /** A game's local per-player state (device only) expires this long after it was last written. */
+    localTtlSeconds: number;
   };
   chat: {
     burst: number;
@@ -89,6 +97,7 @@ export const DEFAULT_CONFIG: AppConfig = {
     maxChunkSize: 12_000,
     maxChunksPerMessage: 256,
     chunkBufferTtlMs: 30_000,
+    disconnectGraceMs: 3_000,
   },
   bus: {
     commandTtlMs: 30_000,
@@ -103,6 +112,10 @@ export const DEFAULT_CONFIG: AppConfig = {
     helloIntervalMs: 3_000,
     linkWaitMs: 8_000,
     departureGraceMs: 4_000,
+  },
+  game: {
+    awayAfterMs: 10_000,
+    localTtlSeconds: 60 * 60 * 24,
   },
   chat: {
     burst: 30,
@@ -131,3 +144,4 @@ export type BusConfig = AppConfig["bus"];
 export type PresenceConfig = AppConfig["presence"];
 export type ChatConfig = AppConfig["chat"];
 export type ProfileConfig = AppConfig["profile"];
+export type GameConfig = AppConfig["game"];

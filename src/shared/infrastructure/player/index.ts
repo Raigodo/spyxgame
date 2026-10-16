@@ -16,6 +16,8 @@ export type { HostClaimStore } from "./host-claim-store";
 export type { LocalPlayerProfile, PlayerProfileStore } from "./player-profile-store";
 // PlayerDirectory and the Envelope union stay internal.
 
+export { LocalStorageAdapter } from "./adapters/browser/local-storage-adapter";
+
 export interface PlayerStores {
   hostClaims: HostClaimStore;
   profiles: PlayerProfileStore;

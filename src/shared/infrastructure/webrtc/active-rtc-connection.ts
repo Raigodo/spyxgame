@@ -1,6 +1,13 @@
-import { Emitter, shortId, type IdGenerator, type Logger } from "@/shared/kernel";
 import type { RtcDataChannelPort } from "./ports/rtc-data-channel-port";
 import type { RtcPeerConnectionPort } from "./ports/rtc-peer-connection-port";
+import {
+  Countdown,
+  Emitter,
+  shortId,
+  type Clock,
+  type IdGenerator,
+  type Logger,
+} from "@/shared/kernel";
 
 export type ActiveRtcConnectionState = "connected" | "disconnected" | "failed";
 
@@ -9,6 +16,8 @@ export interface ActiveRtcConnectionDeps {
   channel: RtcDataChannelPort;
   ids: IdGenerator;
   logger: Logger;
+  clock: Clock;
+  disconnectGraceMs: number;
 }
 
 export class ActiveRtcConnection {
@@ -18,16 +27,28 @@ export class ActiveRtcConnection {
   private readonly stateChanged = new Emitter<ActiveRtcConnectionState>();
   private readonly messageReceived = new Emitter<string>();
   private readonly log: Logger;
+  private readonly graceTimer: Countdown;
 
   constructor(private readonly deps: ActiveRtcConnectionDeps) {
     this.id = deps.ids.next();
     this.log = deps.logger.child(shortId(this.id));
     this.log.debug("Created");
 
+    this.graceTimer = new Countdown(deps.clock, () => this.setState("disconnected"));
+
     deps.connection.onConnectionState((native) => {
       this.log.debug(`Connection state changed: ${native}`);
-      if (native === "failed") this.setState("failed");
-      else if (native === "disconnected" || native === "closed") this.setState("disconnected");
+      if (native === "failed") {
+        this.graceTimer.stop();
+        this.setState("failed");
+      } else if (native === "closed") {
+        this.graceTimer.stop();
+        this.setState("disconnected");
+      } else if (native === "disconnected") {
+        this.graceTimer.start(deps.disconnectGraceMs);
+      } else if (native === "connected") {
+        this.graceTimer.stop();
+      }
     });
 
     deps.channel.onMessage((message) => this.messageReceived.emit(message));
@@ -71,6 +92,7 @@ export class ActiveRtcConnection {
 
   close(): void {
     this.log.debug("Closed explicitly");
+    this.graceTimer.stop();
     this.deps.channel.close();
     this.deps.connection.close();
     this.setState("disconnected");

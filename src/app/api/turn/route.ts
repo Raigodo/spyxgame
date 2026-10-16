@@ -7,7 +7,11 @@ export const dynamic = "force-dynamic";
 
 // Server only: the TURN key never reaches the browser. Without it we answer with no servers,
 // and the client falls back to STUN only.
-export async function GET() {
+export async function GET(request: Request) {
+  if (request.headers.get("sec-fetch-site") === "cross-site") {
+    return NextResponse.json({ iceServers: [] }, { status: 403 });
+  }
+
   const keyId = process.env.TURN_KEY_ID;
   const apiToken = process.env.TURN_KEY_API_TOKEN;
   if (!keyId || !apiToken) return NextResponse.json({ iceServers: [] });

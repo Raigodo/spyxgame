@@ -66,7 +66,15 @@ export class RoomStateService {
       reduce: (state) =>
         state.phase !== "in-game"
           ? { ok: false, reason: "not-in-game" }
-          : { ok: true, state: { phase: "lobby", lobby: state.lobby, round: state.round + 1 } },
+          : {
+              ok: true,
+              state: {
+                phase: "lobby",
+                lobby: state.lobby,
+                round: state.round + 1,
+                lastGame: state.game && { id: state.game.id, config: state.game.config },
+              },
+            },
     });
   }
 

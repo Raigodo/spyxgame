@@ -1,4 +1,8 @@
-import { PlayerSession, createPlayerStores } from "@/shared/infrastructure/player";
+import {
+  LocalStorageAdapter,
+  PlayerSession,
+  createPlayerStores,
+} from "@/shared/infrastructure/player";
 import {
   createSignalingSession,
   type HostElectionPort,
@@ -42,6 +46,8 @@ export interface MultiplayerClientOverrides {
   /** Longer-lived storage (local profile). */
   profileStore?: KeyValueStore;
   pageLifecycle?: PageLifecycle;
+  /** Device-only storage for games' local state. */
+  localStore?: KeyValueStore;
 }
 
 export function createMultiplayerClient(
@@ -106,5 +112,6 @@ export function createMultiplayerClient(
     logger,
     config,
     pageLifecycle,
+    localStore: overrides.localStore ?? new LocalStorageAdapter(clock),
   });
 }

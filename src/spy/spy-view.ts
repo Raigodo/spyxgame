@@ -3,18 +3,21 @@
 
 import { nonSpyIds, type SpyReason, type SpyState } from "./spy-rules";
 
-/** playerIds that still have to act before the game moves on. Empty when nothing is pending. */
-export function waitingFor(state: SpyState): string[] {
-  if (state.claim) return nonSpyIds(state).filter((id) => !(id in (state.claim?.votes ?? {})));
+/** playerIds that still have to act before the game moves on. Players who are away are not waited for. */
+export function waitingFor(state: SpyState, away: readonly string[] = []): string[] {
+  const here = (ids: string[]) => ids.filter((id) => !away.includes(id));
+  if (state.claim) {
+    return here(nonSpyIds(state).filter((id) => !(id in (state.claim?.votes ?? {}))));
+  }
   switch (state.phase) {
     case "talking": {
       const speaker = state.order[state.turn];
       return speaker === undefined ? [] : [speaker];
     }
     case "deciding":
-      return state.order.filter((id) => !(id in state.decisions));
+      return here(state.order.filter((id) => !(id in state.decisions)));
     case "voting":
-      return state.order.filter((id) => !(id in state.votes));
+      return here(state.order.filter((id) => !(id in state.votes)));
     case "lastChance":
       return state.spyId === undefined ? [] : [state.spyId];
     default:
@@ -62,6 +65,8 @@ const REJECTION_TEXT: Record<string, string> = {
   "too-few-words": "Not enough words in the pool yet.",
   "nothing-to-advance": "Nothing to advance right now.",
   "host-only": "Only the host can do that.",
+  paused: "The game is paused: too few players are here.",
+  "not-paused": "The game is not paused.",
 };
 
 export const rejectionText = (reason: string): string =>

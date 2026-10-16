@@ -1,5 +1,7 @@
-// A player's private notes. They never leave this browser and are never part of game state.
-// Pure shape and parsing only; the panel reads and writes localStorage.
+// A player's private notes. They never leave this device and are never part of game state.
+// Pure shape and validation only; the game handle stores them (see game.local(spyNotes)).
+
+import { defineLocalState } from "@/shared/application/game";
 
 export type Mark = "unknown" | "suspect" | "safe";
 
@@ -24,17 +26,13 @@ export function nextMark(mark: Mark | undefined): Mark {
   return MARK_CYCLE[(index + 1) % MARK_CYCLE.length] as Mark;
 }
 
-/** Notes are the user's own data, but a stale or edited value must not break the page. */
-export function parseNotes(json: string | null): SpyNotes {
-  if (json === null) return emptyNotes();
-  let raw: unknown;
-  try {
-    raw = JSON.parse(json);
-  } catch {
-    return emptyNotes();
-  }
-  if (typeof raw !== "object" || raw === null) return emptyNotes();
-  const { pad, marks, remarks } = raw as Record<string, unknown>;
+const isPlain = (v: unknown): v is Record<string, unknown> =>
+  typeof v === "object" && v !== null && !Array.isArray(v);
+
+/** Stored notes are the user's own data, but a stale or edited value must not break the page. */
+export function validateNotes(raw: unknown): SpyNotes | undefined {
+  if (!isPlain(raw)) return undefined;
+  const { pad, marks, remarks } = raw;
 
   const notes = emptyNotes();
   if (typeof pad === "string") notes.pad = pad.slice(0, MAX_PAD_LENGTH);
@@ -47,5 +45,8 @@ export function parseNotes(json: string | null): SpyNotes {
   return notes;
 }
 
-const isPlain = (v: unknown): v is Record<string, unknown> =>
-  typeof v === "object" && v !== null && !Array.isArray(v);
+export const spyNotes = defineLocalState<SpyNotes>({
+  id: "notes",
+  initial: emptyNotes,
+  validate: validateNotes,
+});

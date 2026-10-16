@@ -15,6 +15,8 @@ export interface LobbyStarterProps {
   disabled: boolean;
   /** Called with the host's verdict after Start, so the lobby can show a rejection. */
   onResult(result: CommandResult): void;
+  /** The config the last game ran with, if it was this game. Unvalidated: parse it before use. */
+  initialConfig?: unknown;
 }
 
 export interface LobbyGameEntry {

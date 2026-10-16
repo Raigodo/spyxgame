@@ -20,6 +20,7 @@ import {
 } from "@/shared/application/messaging";
 import {
   Emitter,
+  KeyValueStore,
   PageLifecycle,
   isRecord,
   listenerFailure,
@@ -30,7 +31,7 @@ import {
   type Logger,
 } from "@/shared/kernel";
 import { RoomStateService, type RoomStateOptions } from "./room-state-service";
-import type { ActiveGame, GameContext, RoomPhase, RoomState } from "./room-state";
+import type { ActiveGame, GameContext, LastGame, RoomPhase, RoomState } from "./room-state";
 import {
   GameHandle,
   GameHostRuntime,
@@ -79,6 +80,7 @@ export interface ClientDeps {
   logger: Logger;
   config: AppConfig;
   pageLifecycle: PageLifecycle;
+  localStore: KeyValueStore;
 }
 
 interface Parts {
@@ -132,6 +134,22 @@ export class MultiplayerClient {
   private readonly handles = new Map<string, object>();
   private readonly roomOptions: RoomStateOptions;
   private readonly seat: HostSeatKeeper;
+
+  private readonly gameBackend = new ClientGameBackend(
+    {
+      getRoomState: () => this.parts?.roomState.getState(),
+      getGame: (id) => this.parts?.games.get(id),
+      isSynced: () => this.lifecycle.hasSynced(),
+      getPlayerId: () => this.playerId,
+      start: (id, config) => this.startGameById(id, config),
+      local: {
+        store: this.deps.localStore,
+        ttlSeconds: this.deps.config.game.localTtlSeconds,
+        getRoomId: () => this.roomId,
+      },
+    },
+    this.onListenerError
+  );
 
   constructor(
     options: ClientOptions,
@@ -280,7 +298,25 @@ export class MultiplayerClient {
         validate: (raw) => runtime.validateSlot(raw),
         resolveSender: (peerId) => presence.getPlayers().find((p) => p.peerId === peerId)?.playerId,
       });
-      runtime.installCommands(channel);
+      const priv = runtime.hasPrivate
+        ? bus.privateChannel<unknown>({
+            id: `game:${id}:private`,
+            validate: (raw) => runtime.validatePrivate(raw),
+            getLocalPlayerId: () => presence.getLocalPlayer()?.playerId,
+            resolveOwner: (peerId) =>
+              presence.getPlayers().find((p) => p.peerId === peerId)?.playerId,
+            resolvePeer: (playerId) =>
+              presence
+                .getPlayers()
+                .find((p) => p.playerId === playerId && p.connectionStatus !== "reconnecting")
+                ?.peerId,
+            getRevisions: () => {
+              const slot = channel.get();
+              return slot ? { round: slot.round, privateRev: slot.privateRev } : undefined;
+            },
+          })
+        : undefined;
+      runtime.installCommands(channel, clock, priv);
       const events = bus.eventChannel<GameEvent>({
         id: `game:${id}:events`,
         validate: (raw) => {
@@ -291,13 +327,21 @@ export class MultiplayerClient {
           return valid === undefined ? undefined : { name, data: valid };
         },
       });
-      games.set(id, { runtime, channel, events });
+      games.set(id, { runtime, channel, events, priv });
     }
 
     const hostRuntime = new GameHostRuntime(games, {
       isHostReady: () => session.isHost() && bus.getStatus() === "ready",
       getRoomState: () => roomState.getState(),
-      getRosterPlayerIds: () => this.roster.getPlayers().map((p) => p.playerId),
+      getRoster: () =>
+        this.roster.getPlayers().map((p) => ({
+          playerId: p.playerId,
+          nickname: p.nickname,
+          present: p.connectionStatus !== "reconnecting",
+        })),
+      endGame: () => void roomState.endGame(),
+      clock,
+      config: config.game,
       logger: logger.child("games"),
     });
 
@@ -321,6 +365,7 @@ export class MultiplayerClient {
         this.refreshPlayers();
         this.hostEm.emit(hostPeerId);
         this.lifecycle.sync();
+        if (!session.isHost()) parts.hostRuntime.reset();
         parts.hostRuntime.reconcile();
       }),
 
@@ -352,8 +397,12 @@ export class MultiplayerClient {
         }),
         game.events.onEvent((event, from) =>
           this.gameBackend.emitEvent(id, event.name, event.data, from)
-        )
+        ),
+        presence.onPlayerRemoved((playerId) => parts.hostRuntime.dropPlayer(playerId))
       );
+      if (game.priv) {
+        parts.cleanups.push(game.priv.onMineChanged(() => this.gameBackend.emitSlot(id)));
+      }
     }
 
     // A refresh fires pagehide (a deliberate leave removes this subscription first). Mark the
@@ -402,6 +451,7 @@ export class MultiplayerClient {
   private disposeParts(parts: Parts): void {
     for (const off of parts.cleanups) off();
     parts.cleanups.length = 0;
+    parts.hostRuntime.reset();
     parts.chat.dispose();
     parts.bus.dispose();
     parts.presence.dispose();
@@ -459,6 +509,11 @@ export class MultiplayerClient {
 
   getActiveGame(): ActiveGame | undefined {
     return this.lifecycle.hasSynced() ? this.parts?.roomState.getState().game : undefined;
+  }
+
+  /** The game that last ended, with its config. Undefined until synced or before any game. */
+  getLastGame(): LastGame | undefined {
+    return this.lifecycle.hasSynced() ? this.parts?.roomState.getState().lastGame : undefined;
   }
 
   getGameContext(): GameContext | undefined {
@@ -613,8 +668,8 @@ export class MultiplayerClient {
   }
 
   /** Host-only. The config type is checked against the game definition. */
-  startGame<C, S, Cmds extends object, Evs extends object, M extends LobbyMode>(
-    game: GameDefinition<C, S, Cmds, Evs, M>,
+  startGame<C, S, Cmds extends object, Evs extends object, M extends LobbyMode, H = unknown>(
+    game: GameDefinition<C, S, Cmds, Evs, M, H>,
     config: C
   ): Promise<CommandResult> {
     return this.startGameById(game.id, config);
@@ -671,13 +726,13 @@ export class MultiplayerClient {
   }
 
   /** The typed handle for a registered game. Same handle every call. */
-  getGame<C, S, Cmds extends object, Evs extends object, M extends LobbyMode>(
-    game: GameDefinition<C, S, Cmds, Evs, M>
-  ): GameHandle<C, S, Cmds, Evs, M> {
+  getGame<C, S, Cmds extends object, Evs extends object, M extends LobbyMode, H = unknown>(
+    game: GameDefinition<C, S, Cmds, Evs, M, H>
+  ): GameHandle<C, S, Cmds, Evs, M, H> {
     if (!this.registry.has(game.id)) {
       throw new Error(`[MultiplayerClient] Game "${game.id}" is not registered.`);
     }
-    let handle = this.handles.get(game.id) as GameHandle<C, S, Cmds, Evs, M> | undefined;
+    let handle = this.handles.get(game.id) as GameHandle<C, S, Cmds, Evs, M, H> | undefined;
     if (!handle) {
       handle = new GameHandle(game, this.gameBackend);
       this.handles.set(game.id, handle);
@@ -720,15 +775,4 @@ export class MultiplayerClient {
   private refreshPending(): void {
     this.roster.refreshPending(this.parts?.presence);
   }
-
-  private readonly gameBackend = new ClientGameBackend(
-    {
-      getRoomState: () => this.parts?.roomState.getState(),
-      getGame: (id) => this.parts?.games.get(id),
-      isSynced: () => this.lifecycle.hasSynced(),
-      getPlayerId: () => this.playerId,
-      start: (id, config) => this.startGameById(id, config),
-    },
-    this.onListenerError
-  );
 }

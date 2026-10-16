@@ -34,6 +34,8 @@ export class RtcPeerLinkFactory {
       connection: connections.create(),
       ids,
       logger: logger.child("negotiator"),
+      clock: this.deps.clock,
+      disconnectGraceMs: this.deps.config.disconnectGraceMs,
     });
     const entry: PeerEntry = { negotiator, connection: null, status: "connecting" };
 

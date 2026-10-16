@@ -1,7 +1,13 @@
 import type { GameBackend, GameRuntime, Slot, SlotValue } from "@/shared/application/game";
-import type { CommandResult, EventChannel, StateChannel } from "@/shared/application/messaging";
+import type {
+  CommandResult,
+  EventChannel,
+  StateChannel,
+  PrivateChannel,
+} from "@/shared/application/messaging";
 import { Emitter } from "@/shared/kernel";
 import type { RoomState } from "./room-state";
+import { LocalStorageDeps } from "../game/local-state";
 
 export const NOT_JOINED: CommandResult = { ok: false, kind: "left", reason: "not joined" };
 
@@ -18,6 +24,7 @@ export interface GameParts {
   runtime: GameRuntime;
   channel: StateChannel<SlotValue>;
   events: EventChannel<GameEvent>;
+  priv?: PrivateChannel<unknown>;
 }
 
 export interface ClientGameBackendDeps {
@@ -27,6 +34,8 @@ export interface ClientGameBackendDeps {
   isSynced(): boolean;
   getPlayerId(): string | undefined;
   start(id: string, config: unknown): Promise<CommandResult>;
+  /** Device storage for games' local state. Without it local state is not stored. */
+  local?: LocalStorageDeps;
 }
 
 // What GameHandle talks to. Reads the client's live parts through `deps`, so it is safe before
@@ -34,6 +43,7 @@ export interface ClientGameBackendDeps {
 export class ClientGameBackend implements GameBackend {
   private readonly slotEms = new Map<string, Emitter>();
   private readonly eventEms = new Map<string, Emitter<GameEventDelivery>>();
+  private readonly localEms = new Map<string, Emitter>();
 
   constructor(
     private readonly deps: ClientGameBackendDeps,
@@ -54,6 +64,11 @@ export class ClientGameBackend implements GameBackend {
 
   getLocalPlayerId(): string | undefined {
     return this.deps.getPlayerId();
+  }
+
+  getPrivate(id: string): unknown {
+    const slot = this.getSlot(id);
+    return slot ? this.deps.getGame(id)?.priv?.getMine(slot) : undefined;
   }
 
   sendCommand(id: string, name: string, payload: unknown): Promise<CommandResult> {
@@ -78,6 +93,23 @@ export class ClientGameBackend implements GameBackend {
 
   onEvent(id: string, handler: (name: string, data: unknown, from: string) => void): () => void {
     return this.eventEmitter(id).on(({ name, data, from }) => handler(name, data, from));
+  }
+
+  readLocal(gameId: string, id: string): string | undefined {
+    const key = this.localKey(gameId, id);
+    return key === undefined ? undefined : this.deps.local?.store.get(key);
+  }
+
+  writeLocal(gameId: string, id: string, raw: string): void {
+    const key = this.localKey(gameId, id);
+    const local = this.deps.local;
+    if (key === undefined || !local) return;
+    local.store.set(key, raw, { ttlSeconds: local.ttlSeconds });
+    this.localEmitter(gameId, id).emit();
+  }
+
+  onLocalChanged(gameId: string, id: string, handler: () => void): () => void {
+    return this.localEmitter(gameId, id).on(handler);
   }
 
   // ─── Called by the client ─────────────────────────────────────────────────
@@ -106,6 +138,22 @@ export class ClientGameBackend implements GameBackend {
     if (!emitter) {
       this.eventEms.set(id, (emitter = new Emitter<GameEventDelivery>(this.onListenerError)));
     }
+    return emitter;
+  }
+
+  // Scoped to room, round and player: a refresh keeps it, a new round starts clean.
+  private localKey(gameId: string, id: string): string | undefined {
+    const roomId = this.deps.local?.getRoomId();
+    const playerId = this.deps.getPlayerId();
+    const slot = this.getSlot(gameId);
+    if (!roomId || playerId === undefined || !slot) return undefined;
+    return `game-local:${gameId}:${id}:${roomId}:${slot.round}:${playerId}`;
+  }
+
+  private localEmitter(gameId: string, id: string): Emitter {
+    const key = `${gameId}:${id}`;
+    let emitter = this.localEms.get(key);
+    if (!emitter) this.localEms.set(key, (emitter = new Emitter(this.onListenerError)));
     return emitter;
   }
 }

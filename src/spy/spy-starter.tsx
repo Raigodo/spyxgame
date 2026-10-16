@@ -8,10 +8,11 @@ import { useRoom } from "@/shared/presentation/room/room-provider";
 import { spyGame } from "./spy";
 import { DEFAULT_SPY_CONFIG, validateSpyConfig } from "./spy-validation";
 
-export function SpyStarter({ disabled, onResult }: LobbyStarterProps) {
+export function SpyStarter({ disabled, onResult, initialConfig }: LobbyStarterProps) {
   const { client } = useRoom();
-  const [wordsPerPlayer, setWordsPerPlayer] = useState(String(DEFAULT_SPY_CONFIG.wordsPerPlayer));
-  const [minWords, setMinWords] = useState(String(DEFAULT_SPY_CONFIG.minWords));
+  const initial = validateSpyConfig(initialConfig) ?? DEFAULT_SPY_CONFIG;
+  const [wordsPerPlayer, setWordsPerPlayer] = useState(String(initial.wordsPerPlayer));
+  const [minWords, setMinWords] = useState(String(initial.minWords));
   const config = validateSpyConfig({
     wordsPerPlayer: Number(wordsPerPlayer),
     minWords: Number(minWords),

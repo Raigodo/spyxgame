@@ -15,5 +15,8 @@
 - **Dev only:** React StrictMode needs the provider's one-tick join delay; Fast Refresh calls `leave()` and forgets the host hint (test reclaim in a production build).
 - `RoomNavigator` compares pathname to `/room/${roomId}${sub}`; room codes are restricted to `[A-Za-z0-9_-]{3,32}`.
 - Test coverage: pure cores, classes and multi-peer scenarios on the harness. Link timing and ICE batching cannot be tested with the fakes.
+- A guest on an older build than the host stays syncing until it reloads.
+- Timer deadlines use the host’s clock; guest countdowns show device-clock skew (typically about a second).
+- The host can read every private piece (it is a browser). The host’s own piece survives a refresh only through recover. A guest with a slow link at failover may have its piece regenerated.
 
 Candidates, only if real usage asks for them: a separate reclaim delay (to shrink the election window further), a durable ban list.

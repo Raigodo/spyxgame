@@ -9,6 +9,7 @@ import type {
   ActiveGame,
   ChatLine,
   ClientStatus,
+  LastGame,
   LobbyInfo,
   MultiplayerClient,
   RoomPhase,
@@ -104,9 +105,14 @@ export function useChat(): readonly ChatLine[] {
 // ─── Games ──────────────────────────────────────────────────────────────────
 
 /** The typed handle for a registered game (the same object on every call). */
-export function useGameHandle<C, S, Cmds extends object, Evs extends object, M extends LobbyMode>(
-  game: GameDefinition<C, S, Cmds, Evs, M>
-) {
+export function useGameHandle<
+  C,
+  S,
+  Cmds extends object,
+  Evs extends object,
+  M extends LobbyMode,
+  H = unknown,
+>(game: GameDefinition<C, S, Cmds, Evs, M>) {
   const { client } = useRoom();
   return client.getGame(game);
 }
@@ -122,4 +128,28 @@ export function useGameValue<T>(
 ): T {
   const subscribe = useCallback((notify: () => void) => handle.onChanged(notify), [handle]);
   return useSyncExternalStore(subscribe, get, get);
+}
+
+export function useLastGame(): LastGame | undefined {
+  return useClientValue(
+    (c, n) => c.onGameChanged(n),
+    (c) => c.getLastGame(),
+    () => undefined
+  );
+}
+
+const TICK_MS = 250;
+function subscribeTicks(notify: () => void): () => void {
+  const handle = setInterval(notify, TICK_MS);
+  return () => clearInterval(handle);
+}
+const currentTick = () => Math.floor(Date.now() / TICK_MS) * TICK_MS;
+
+/** Milliseconds left on a game timer (display only, redraws every 250ms). Frozen while paused. */
+export function useCountdown(
+  timer: { deadlineAt: number; paused: boolean; remainingMs?: number } | undefined
+): number | undefined {
+  const now = useSyncExternalStore(subscribeTicks, currentTick, () => 0);
+  if (!timer) return undefined;
+  return timer.paused ? timer.remainingMs : Math.max(0, timer.deadlineAt - now);
 }

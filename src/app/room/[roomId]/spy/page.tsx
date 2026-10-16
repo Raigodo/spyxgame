@@ -16,12 +16,14 @@ import { currentSpeakerId, MAX_WORD_LENGTH, nonSpyIds } from "@/spy/spy-rules";
 import { spyGame } from "@/spy/spy";
 import { SpyNotesPanel } from "@/spy/spy-notes-panel";
 import { canForceAdvance, rejectionText, resultText, waitingFor } from "@/spy/spy-view";
+import { shortId } from "@/shared/kernel";
+import { spyNotes } from "@/spy/spy-notes";
 
 const btn = "disabled:opacity-40 px-3 py-1 rounded font-semibold";
 
 export default function SpyPage() {
   const router = useRouter();
-  const { client, roomId } = useRoom();
+  const { client } = useRoom();
   const game = useGameHandle(spyGame);
   const players = usePlayers();
   const isHost = useIsHost();
@@ -30,6 +32,11 @@ export default function SpyPage() {
   const state = useGameValue(game, () => game.getState());
   const config = useGameValue(game, () => game.getConfig());
   const role = useGameValue(game, () => game.getRole());
+  const away = useGameValue(game, () => game.getAway());
+  const paused = useGameValue(game, () => game.isPaused());
+  const notesHandle = game.local(spyNotes);
+  const notes = useGameValue(notesHandle, () => notesHandle.get());
+  const gamePlayers = useGameValue(game, () => game.getPlayers());
 
   const [notice, setNotice] = useState<string | null>(null);
   const [wordInput, setWordInput] = useState("");
@@ -37,7 +44,7 @@ export default function SpyPage() {
 
   const me = players.find((p) => p.peerId === client.getLocalPeerId())?.playerId;
   const nameOf = (playerId: string) =>
-    players.find((p) => p.playerId === playerId)?.nickname ?? playerId.slice(0, 8);
+    gamePlayers.find((p) => p.playerId === playerId)?.name ?? shortId(playerId);
 
   async function act(run: () => Promise<CommandResult>) {
     const result = await run();
@@ -58,11 +65,11 @@ export default function SpyPage() {
   const isSpy = isPlayer && state.spyId === me;
   const playing = state.phase !== "collecting" && state.phase !== "ended";
   const speaker = currentSpeakerId(state);
-  const waiting = waitingFor(state);
+  const waiting = waitingFor(state, away);
   const myWords = state.words.filter((w) => w.ownerId === me);
-  const roundPlayers = (state.order.length > 0 ? state.order : players.map((p) => p.playerId)).map(
-    (playerId) => ({ playerId, name: nameOf(playerId) })
-  );
+  const roundPlayers = (
+    state.order.length > 0 ? state.order : gamePlayers.map((p) => p.playerId)
+  ).map((playerId) => ({ playerId, name: nameOf(playerId) }));
 
   return (
     <div className="bg-slate-950 p-6 min-h-screen text-slate-200 text-sm">
@@ -95,9 +102,29 @@ export default function SpyPage() {
           <p className="bg-rose-950 p-2 border border-rose-800 rounded text-rose-300">{notice}</p>
         )}
 
+        {away.length > 0 && (
+          <p className="bg-amber-950 p-2 border border-amber-800 rounded text-amber-300 text-xs">
+            Away: {away.map(nameOf).join(", ")}. Their turns and votes are skipped. They can rejoin.
+          </p>
+        )}
+        {paused && (
+          <div className="flex items-center gap-2 bg-amber-950 p-2 border border-amber-800 rounded text-amber-300">
+            <span>Paused: too few players are here.</span>
+            {isHost && (
+              <button
+                disabled={syncing}
+                className={`border border-amber-700 ${btn}`}
+                onClick={() => void act(() => game.continueAnyway())}
+              >
+                Continue anyway
+              </button>
+            )}
+          </div>
+        )}
+
         {/* The word or the spy role. Only the player themself sees it. */}
         {playing && isPlayer && (
-          <p className="bg-slate-900 p-3 border border-slate-700 rounded text-center text-lg">
+          <p className="bg-slate-900 p-3 border border-slate-700 rounded text-lg text-center">
             {isSpy ? (
               <span className="font-bold text-rose-400">You are the SPY</span>
             ) : (
@@ -197,6 +224,7 @@ export default function SpyPage() {
                 >
                   {i + 1}. {nameOf(id)}
                   {id === speaker && " ← speaking"}
+                  {away.includes(id) && " (away)"}
                 </li>
               ))}
             </ol>
@@ -352,8 +380,8 @@ export default function SpyPage() {
 
         {isPlayer && (
           <SpyNotesPanel
-            key={`${roomId}:${me}:${state.rngSeed}`}
-            storageKey={`spy-notes:${roomId}:${me}:${state.rngSeed}`}
+            notes={notes}
+            onChange={(next) => notesHandle.set(next)}
             players={roundPlayers.filter((p) => p.playerId !== me)}
           />
         )}

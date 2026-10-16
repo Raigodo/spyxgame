@@ -22,7 +22,7 @@ Bottom to top. No React hooks below presentation.
 
 **infrastructure/player**: PlayerSession (star relay, roster, verified-sender stamping), PlayerDirectory, HostClaimStore (refresh hint), PlayerProfileStore (nickname), envelope-parser, roster-diff.
 
-**application/messaging**: RoomBus (routing, status, queue flushing; wire kinds dispatch through a typed handler table), StateChannel, EventChannel, BusRecovery, CommandQueue, wire parsing, bus-rules, transport adapter over PlayerSession.
+**application/messaging**: RoomBus (routing, status, queue flushing; wire kinds dispatch through a typed handler table), StateChannel, EventChannel, BusRecovery, CommandQueue, wire parsing, bus-rules, transport adapter over PlayerSession, PrivateChannel.
 
 **application/presence**: PlayerReconnectionCoordinator (event dispatcher, kick, ban, hello) over PresenceBook (statuses), DuplicateView (every-peer hiding), DuplicateArbiter (host-only ping/pong). PlayerPresenceService (roster read-model), DepartureGhosts. Pure: duplicate-rules, presence-history, presence-bans. Channels: `presence` (events), `presence:history`, `presence:bans`.
 
@@ -31,6 +31,12 @@ Bottom to top. No React hooks below presentation.
 **application/chat, game**: ChatService; defineGame, GameRuntime, GameHandle, GameHostRuntime.
 
 **application/room**: RoomStateService, MultiplayerClient (facade), createMultiplayerClient (composition root). Client helpers: HostSeatKeeper, ClientGameBackend, RosterView, ClientLifecycle.
+
+**application/game**
+
+- `game-effects` (pure effect handling)
+- `game-timers` (pure), TimerScheduler
+- `game-private`
 
 **presentation**: RoomProvider, hooks (`useClientValue` over `useSyncExternalStore`), RoomNavigator, ChatPanel, pages, game registry. Pages are the regression boundary.
 

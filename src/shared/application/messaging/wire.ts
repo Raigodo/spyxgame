@@ -12,6 +12,12 @@ export interface ChannelCopy {
   applied: Record<PeerId, number>;
 }
 
+function parsePiece(v: Record<string, unknown>) {
+  return typeof v.ch === "string" && isInt(v.round) && v.round >= 0 && isInt(v.rev) && v.rev >= 0
+    ? { ch: v.ch, round: v.round, rev: v.rev, value: v.value }
+    : undefined;
+}
+
 export type Wire =
   | ({ __bus: 1; kind: "state" } & ChannelCopy)
   | { __bus: 1; kind: "offer"; channels: ChannelCopy[] }
@@ -27,7 +33,9 @@ export type Wire =
     }
   | { __bus: 1; kind: "ack"; id: string; result: CommandResult }
   | { __bus: 1; kind: "event"; ch: string; event: unknown }
-  | { __bus: 1; kind: "recover" };
+  | { __bus: 1; kind: "recover" }
+  | { __bus: 1; kind: "private"; ch: string; round: number; rev: number; value: unknown }
+  | { __bus: 1; kind: "mine"; ch: string; round: number; rev: number; value: unknown };
 
 function parseCopy(v: unknown): ChannelCopy | undefined {
   if (!isRecord(v) || typeof v.ch !== "string" || !isInt(v.epoch) || !isInt(v.rev))
@@ -89,6 +97,14 @@ export function parseWire(v: unknown): Wire | undefined {
         : undefined;
     case "recover":
       return { __bus: 1, kind: "recover" };
+    case "private": {
+      const piece = parsePiece(v);
+      return piece && { __bus: 1, kind: "private", ...piece };
+    }
+    case "mine": {
+      const piece = parsePiece(v);
+      return piece && { __bus: 1, kind: "mine", ...piece };
+    }
     default:
       return undefined;
   }

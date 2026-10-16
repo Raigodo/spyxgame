@@ -32,6 +32,7 @@ Grouped by topic. If a decision is reversed, edit the entry instead of appending
 - Presence split: `PresenceBook` (data), `DuplicateView`, `DuplicateArbiter`; the coordinator dispatches and keeps two orders: pong before host-only guards, survivor restore before the reveal. Pinned by `presence-scenarios.test.ts`.
 - Presence history is the replicated `presence:history` channel (50 max, same player replaces its entry); every peer reports departures; a promoted host restores itself once, within `linkWaitMs`, filling only missing keys.
 - Bans: replicated `presence:bans` channel (100 max, per room). Applied in visibility: hidden on every peer, never a ghost, a ban change re-projects the roster.
+- Spy resolves phases through one pure settle; the reducers only record the action.
 
 ## Messaging and bus
 
@@ -72,3 +73,11 @@ Grouped by topic. If a decision is reversed, edit the entry instead of appending
 ## Docs
 
 - Docs live in `design.md` (overview), `docs/` (reference) and `conventions.md` (rules). Tests that read docs find tables by row prefix, not by section number.
+
+## Games
+
+- Reducers may return effects: emit records a replicated, round-scoped notice (newest 50, validated by the game’s events), end sets slot.endRequested and the host runtime ends the game once per round. Notices live in the slot, so they survive failover and refreshed tabs.
+- Game version and migrate upgrade older slots at validation; a slot from a newer build is rejected, so that guest reloads.
+- Timers are slot data (slot.timers, deadlines stamped from the host’s Clock when the effect is applied). The host runtime arms one Clock.after per running timer, fires the handler and removes the timer in one publish, re-arms from the slot after failover, and freezes timers while paused. presence.onChange may return withEffects.
+- A game’s device-only state is declared with defineLocalState and read through game.local(def). It lives in an injected KeyValueStore (localStorage with expiry), keyed by room, round and player, and is never replicated.
+- Private per-player state: the slot replicates only revisions (privateRev); pieces live in the host’s memory and each owner’s, moved by the bus PrivateChannel (private host to owner, mine owner to host). Pieces are committed before the slot referencing them is published. A mismatching piece re-requests itself on the resync timer. After a failover guests offer their own piece before the state offer; the host adopts only a verified owner’s matching piece, and privateState.recover rebuilds the rest.

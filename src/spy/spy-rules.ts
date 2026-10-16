@@ -236,10 +236,7 @@ export function applyDecide(state: SpyState, playerId: string, choice: SpyChoice
   if (blocked) return reject(blocked);
   if (!state.order.includes(playerId)) return reject("not-a-participant");
 
-  const next = { ...state, decisions: { ...state.decisions, [playerId]: choice } };
-  return ok(
-    Object.keys(next.decisions).length >= state.order.length ? resolveDecisions(next) : next
-  );
+  return ok({ ...state, decisions: { ...state.decisions, [playerId]: choice } });
 }
 
 // ─── Voting ─────────────────────────────────────────────────────────────────
@@ -266,8 +263,7 @@ export function applyVote(state: SpyState, playerId: string, target: string): Sp
   if (target === playerId) return reject("cannot-vote-self");
   if (!state.order.includes(target)) return reject("unknown-target");
 
-  const next = { ...state, votes: { ...state.votes, [playerId]: target } };
-  return ok(Object.keys(next.votes).length >= state.order.length ? resolveVotes(next) : next);
+  return ok({ ...state, votes: { ...state.votes, [playerId]: target } });
 }
 
 // ─── Claim ("I know the word") ──────────────────────────────────────────────
@@ -304,12 +300,10 @@ export function applyClaimVote(state: SpyState, playerId: string, correct: boole
   if (!state.claim) return reject("no-claim");
   if (playerId === state.spyId || !state.order.includes(playerId)) return reject("not-eligible");
 
-  const next: SpyState = {
+  return ok({
     ...state,
     claim: { ...state.claim, votes: { ...state.claim.votes, [playerId]: correct } },
-  };
-  const everyone = Object.keys(next.claim?.votes ?? {}).length >= nonSpyIds(state).length;
-  return ok(everyone ? resolveClaim(next) : next);
+  });
 }
 
 // ─── Last chance and host override ──────────────────────────────────────────
@@ -335,4 +329,58 @@ export function applyForceAdvance(state: SpyState): SpyOutcome {
     default:
       return reject("nothing-to-advance");
   }
+}
+
+// ─── Settling (away players) ────────────────────────────────────────────────
+
+/** True when someone has answered and every player still here has too. */
+function allHereAnswered(
+  ids: readonly string[],
+  cast: Record<string, unknown>,
+  away: readonly string[]
+): boolean {
+  return Object.keys(cast).length > 0 && ids.every((id) => id in cast || away.includes(id));
+}
+
+function settleOnce(state: SpyState, away: readonly string[]): SpyState {
+  if (state.phase === "ended") return state;
+  if (state.claim) {
+    return allHereAnswered(nonSpyIds(state), state.claim.votes, away) ? resolveClaim(state) : state;
+  }
+  switch (state.phase) {
+    case "talking": {
+      const speaker = state.order[state.turn];
+      if (speaker === undefined || !away.includes(speaker)) return state;
+      const turn = state.turn + 1; // an away speaker is skipped, a returning one does not get the turn back
+      return turn < state.order.length
+        ? { ...state, turn }
+        : { ...state, phase: "deciding", turn: 0, decisions: {} };
+    }
+    case "deciding":
+      return allHereAnswered(state.order, state.decisions, away) ? resolveDecisions(state) : state;
+    case "voting":
+      return allHereAnswered(state.order, state.votes, away) ? resolveVotes(state) : state;
+    default:
+      return state;
+  }
+}
+
+/**
+ * Applies everything that follows from who is away: skips away speakers and resolves a phase once
+ * every player still here has answered. Repeats until stable (a skip can land on another away
+ * player). The same state object comes back when nothing changed.
+ */
+export function settleState(state: SpyState, away: readonly string[]): SpyState {
+  let current = state;
+  for (let i = 0; i < state.order.length + 4; i++) {
+    const next = settleOnce(current, away);
+    if (next === current) return current;
+    current = next;
+  }
+  return current;
+}
+
+/** Wraps a rule's outcome so a successful change is settled before it is published. */
+export function settle(outcome: SpyOutcome, away: readonly string[]): SpyOutcome {
+  return outcome.ok ? ok(settleState(outcome.state, away)) : outcome;
 }

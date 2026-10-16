@@ -12,6 +12,7 @@ import {
 } from "@/shared/presentation/room/room-hooks";
 import { useRoom } from "@/shared/presentation/room/room-provider";
 import { demoTap } from "@/demo-tap/demo-tap";
+import { shortId } from "@/shared/kernel";
 
 const EMOJIS = ["👍", "🔥", "😂", "😮"];
 
@@ -35,6 +36,7 @@ export default function DemoGamePage() {
   const context = useGameValue(game, () => game.getContext());
   const role = useGameValue(game, () => game.getRole());
   const team = useGameValue(game, () => game.getMyTeam());
+  const gamePlayers = useGameValue(game, () => game.getPlayers());
 
   const [notice, setNotice] = useState<string | null>(null);
   const [emotes, setEmotes] = useState<EmoteLine[]>([]);
@@ -51,7 +53,7 @@ export default function DemoGamePage() {
   );
 
   const nameOfPlayer = (playerId: string) =>
-    players.find((p) => p.playerId === playerId)?.nickname ?? playerId.slice(0, 8);
+    gamePlayers.find((p) => p.playerId === playerId)?.name ?? shortId(playerId);
   const nameOfPeer = (peerId: string) =>
     players.find((p) => p.peerId === peerId)?.nickname ?? peerId.slice(0, 8);
 

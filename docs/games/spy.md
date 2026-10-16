@@ -9,6 +9,7 @@ All talking happens in an external voice call. The game only coordinates who doe
 - Randomness: the host's `begin` carries one integer `seed`. Word, spy, speaking order and every tie-break derive from it with a seeded PRNG (`spy-rules.ts`), so failover stays deterministic.
 - Secrecy is trust-based. `word` and `spyId` replicate to every peer (needed for failover). The UI hides them.
 - Local notes are never replicated (presentation layer only).
+- Away players (replicated slot.away) are skipped and not waited for. settle in spy-rules.ts does all skipping and phase resolution.
 
 ## Config
 
@@ -20,7 +21,7 @@ All talking happens in an external voice call. The game only coordinates who doe
 
 ## Phases
 
-1. **collecting**: players add or remove their own words (visible to all). The host can `begin` with at least `minWords` words.
+1. **collecting**: players add or remove their own words (visible to all). The host can `begin` with at least `minWords` words. A speaker who is away is skipped. In deciding, voting and claim votes a phase resolves once every player who is not away has answered (at least one answer needed).
 2. **talking**: circle _n_, speaker is `order[turn]`. After the last speaker go to deciding.
 3. **deciding**: everyone picks `vote` or `continue`. More than 50% `vote` goes to voting. Otherwise next circle (same order).
 4. **voting**: everyone votes for one other player (the spy too). Plurality wins, ties broken by seed.
@@ -61,6 +62,7 @@ Free-text pad per game, per-player marker (`?` / suspect / safe) plus a short no
 
 ## Known limits
 
-- Disconnected players block `decide`, `vote` and claim votes until the host uses `forceAdvance`.
-- If the spy leaves mid-game, the host ends it with `endGame`.
+- Players who are away no longer block the game. forceAdvance is needed only when everyone is away or when the spy is away in lastChance.
+- Below 3 present players the game pauses; the host can continue anyway or end it.
+- If the spy leaves mid-game, the host ends it with endGame.
 - Spectators see neither word nor spy until the game ends.

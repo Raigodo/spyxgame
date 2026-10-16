@@ -43,6 +43,8 @@ export async function fetchIceServers(): Promise<IceServerConfig[]> {
 
 export function configWithIceServers(extra: readonly IceServerConfig[]): AppConfig {
   return createConfig({
-    webrtc: { iceServers: [...DEFAULT_CONFIG.webrtc.iceServers, ...extra] },
+    webrtc: {
+      iceServers: extra.length > 0 ? [...extra] : DEFAULT_CONFIG.webrtc.iceServers,
+    },
   });
 }

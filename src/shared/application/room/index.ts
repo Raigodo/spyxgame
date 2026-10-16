@@ -1,6 +1,6 @@
 export type { MultiplayerClient } from "./multiplayer-client";
 export type { ClientStatus, JoinOptions, JoinResult, LobbyInfo } from "./multiplayer-client";
-export type { ActiveGame, GameContext, RoomPhase } from "./room-state";
+export type { ActiveGame, GameContext, LastGame, RoomPhase } from "./room-state";
 export type { RoomStateOptions } from "./room-state-service";
 // RoomStateService and the sanitizers stay internal.
 

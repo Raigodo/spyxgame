@@ -63,3 +63,7 @@ kernel -> infrastructure (signaling, webrtc, player) -> application (messaging, 
 - **A port:** interface in `ports/`, adapter in `adapters/`, injected through the owner's deps, default wired in the layer's `index.ts`, override in `createMultiplayerClient`, a fake for tests.
 - **A timer or limit:** add it to the matching config section with a comment, read it from the injected config, add its row to `docs/timers.md`.
 - **Host-only behavior:** use `hostOnly: true` commands; the logic must work from replicated state alone.
+- A reducer that must tell everyone something (round over, someone scored) returns an emit effect instead of the page diffing state. A reducer that finishes the game returns end.
+- Changing the shape of config or state: bump version and add migrate for the old shapes.
+- A timed rule is a timers handler plus a startTimer effect, never a timeout in the page.
+- Secret per-player data: privateState with a deterministic recover. Never keep secrets in state

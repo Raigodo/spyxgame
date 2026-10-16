@@ -35,3 +35,9 @@
 
 - Teardown order: client wiring, bus, presence, session. `leaveRoom` is idempotent and every remote step is best-effort.
 - Firestore: no new reads or polling without a clear need.
+
+## Game
+
+- Effects are plain data in the slot; the host runtime acts on endRequested and never emits notices itself.
+- A timer is removed in the same publish that applies its handler (exactly once). Game logic never reads the clock; deadlines are display data.
+- A private piece is sent only to its owner and is never in the slot or a broadcast. A demoted host drops everyone else’s pieces. A piece is shown only if its round and revision match the replicated state.

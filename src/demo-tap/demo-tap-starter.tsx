@@ -7,9 +7,11 @@ import type { LobbyStarterProps } from "@/shared/presentation/room/lobby-games";
 import { useRoom } from "@/shared/presentation/room/room-provider";
 import { demoTap } from "./demo-tap";
 
-export function DemoTapStarter({ disabled, onResult }: LobbyStarterProps) {
+export function DemoTapStarter({ disabled, onResult, initialConfig }: LobbyStarterProps) {
   const { client } = useRoom();
-  const [goalInput, setGoalInput] = useState("20");
+  const [goalInput, setGoalInput] = useState(() =>
+    String(demoTap.spec.validateConfig(initialConfig)?.goal ?? 20)
+  );
   const config = demoTap.spec.validateConfig({ goal: Number(goalInput) });
 
   return (
