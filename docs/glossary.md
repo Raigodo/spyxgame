@@ -12,3 +12,9 @@
 - **Host seat**: the host document naming a peer. **Reclaim**: a refreshed host taking the seat back with a new peer id.
 - **Confirmed candidate**: a guest that wrote its candidacy after the collection window; only these are elected.
 - **Naming rule**: `use*` is for React hooks only. Non-hook accessors are `get*`.
+- **Slot**: a game's replicated value (`game:<id>` channel) while it runs. **Round**: incremented on every `endGame`; a slot or piece from another round is stale.
+- **Away**: a game participant missing for `awayAfterMs`, marked in the slot by the host runtime. Different from a ghost (a local row, 4s).
+- **Notice**: a named, typed moment a reducer emitted into the slot (`emit` effect), readable by everyone. Different from an **event** (ephemeral, sent by a peer's UI).
+- **Piece** (private state): one player's secret value. Only its owner and the host hold it.
+- **Epoch / rev**: the version of a state channel. A new host starts a new epoch.
+- **Naming rule for docs**: concept docs live in `docs/concepts/`, per-game specs in `docs/games/`.

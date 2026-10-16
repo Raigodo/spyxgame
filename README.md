@@ -1,19 +1,13 @@
 # Spyxgame
 
-Browser board-game framework. Players talk peer to peer over WebRTC, and Firestore is used only for signaling (room membership, offers and answers, host election). Any game is one typed definition plus a page.
+Browser board-game framework. Players talk peer to peer over WebRTC, and Firestore is used only for signaling. A game is one typed definition plus a page.
 
-## Docs
-
-- [design.md](./design.md): architecture overview and a map of the reference docs.
-- [conventions.md](./conventions.md): rules for writing code, and how to add a game, port, timer or message.
-- [docs/](./docs): layers, messaging model, invariants, timers, decision log, known issues, glossary.
-
-Read `design.md` before changing anything under `src/shared`.
+**Documentation:** start at [docs/README.md](./docs/README.md). Working agreements for contributors and agents: [AGENTS.md](./AGENTS.md).
 
 ## Setup
 
-1. Copy `.env.example` to `.env` and fill in the Firebase values.
-2. Enable Firestore in your Firebase project. Optionally add TTL policies on `expiresAt` for the `rooms`, `signaling-peers`, `messages`, `election-candidates` and `host` collection groups (see [docs/decisions.md](./docs/decisions.md), Firestore cost).
+1. Copy `.env.example` to `.env` and fill in the Firebase values. Optionally set `TURN_KEY_ID` and `TURN_KEY_API_TOKEN` (server-side only) for relay servers.
+2. Enable Firestore. Optionally add TTL policies on `expiresAt` for the `rooms`, `signaling-peers`, `messages`, `election-candidates` and `host` collection groups.
 3. Install and run:
 
 ```bash
@@ -32,9 +26,5 @@ Open http://localhost:3000/room to create or join a room.
 
 ## Debugging
 
-- Log levels: set `NEXT_PUBLIC_LOG_LEVEL` and `NEXT_PUBLIC_LOG_SCOPES` (for example `bus:debug,webrtc:warn`) in `.env`, then restart the dev server.
+- Set `NEXT_PUBLIC_LOG_LEVEL` and `NEXT_PUBLIC_LOG_SCOPES` (for example `bus:debug,webrtc:warn`), then restart the dev server.
 - In a development build, `window.__room()` in the browser console returns a snapshot of the bus, presence, election and links.
-
-## Adding a game
-
-See "Adding things" in [conventions.md](./conventions.md).
