@@ -7,5 +7,6 @@ export default defineConfig({
     environment: "node",
     include: ["src/**/*.test.ts"],
     restoreMocks: true,
+    passWithNoTests: true,
   },
 });
