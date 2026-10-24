@@ -24,11 +24,14 @@ jobs:
   deploy:
     needs: check
     runs-on: ubuntu-latest
-    env:
-      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+   
     steps:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - run: npx vercel --token ${{ secrets.VERCEL_TOKEN }} --prod --confirm
+      - name: Deploy to Vercel
+        run: pnpm exec vercel deploy --prod --yes --token="$VERCEL_TOKEN"
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
