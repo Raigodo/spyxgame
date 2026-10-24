@@ -5,6 +5,7 @@
 import { as, type KeyValueStore, type PlayerId, type Result, type RoomId } from "@/kernel";
 import {
   FakeClock,
+  FakeEntropy,
   FakeIds,
   FakePageLifecycle,
   MemoryKeyValueStore,
@@ -64,7 +65,9 @@ export class RoomHarness {
       clock,
       ids: this.ids,
       log: this.logger.child(name),
-      storages: { tab: tabStore, profile: profileStore },
+      storages: { tab: tabStore, profile: profileStore, device: new MemoryKeyValueStore() },
+      entropy: new FakeEntropy(),
+      games: [],
       pageLifecycle,
       membership: options.membership ?? new FakeRoomMembership(this.firestore, life),
       inbox: new FakeSignalInbox(this.firestore, life),

@@ -1,5 +1,5 @@
-function page() {
-  return <>Welcome</>;
-}
+import { LobbyScreen } from "@/ui/lobby/lobby-screen";
 
-export default page;
+export default function Page() {
+  return <LobbyScreen />;
+}

@@ -1,5 +1,5 @@
-function page() {
-  return <>Welcome</>;
-}
+import { redirect } from "next/navigation";
 
-export default page;
+export default function Page() {
+  redirect("/room");
+}

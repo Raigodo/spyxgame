@@ -3,6 +3,7 @@
 
 import type {
   Clock,
+  Entropy,
   IdGenerator,
   Logger,
   PageLifecycle,
@@ -23,6 +24,7 @@ import type {
   SignalInboxPort,
 } from "@/transport";
 import type { RoomConfig } from "./config";
+import { GameApi, RegisteredGame } from "@/game";
 
 export interface RoomEnd {
   /** superseded: another tab took this player. kicked: kicked or banned. full: no seat. */
@@ -38,6 +40,7 @@ export interface Room {
   /** Set once, then the room has already left. */
   readonly ended: Store<RoomEnd | undefined>;
   readonly roster: Roster;
+  readonly game: GameApi;
   /** Idempotent. */
   leave(): Promise<void>;
   /** A snapshot for diagnostics; exempt from the store rule. */
@@ -48,7 +51,9 @@ export interface RoomDeps {
   clock: Clock;
   ids: IdGenerator;
   log: Logger;
-  storages: Pick<Storages, "tab" | "profile">;
+  storages: Pick<Storages, "tab" | "profile" | "device">;
+  entropy: Entropy;
+  games: readonly RegisteredGame[];
   pageLifecycle: PageLifecycle;
   membership: RoomMembershipPort;
   inbox: SignalInboxPort;

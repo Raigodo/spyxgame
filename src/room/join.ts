@@ -7,6 +7,8 @@ import { createRoster } from "@/roster";
 import { joinTransport, type JoinError } from "@/transport";
 import { describeRoom } from "./debug";
 import type { JoinRoomParams, JoinedRoom, Room, RoomDeps, RoomEnd } from "./model";
+import { createGame } from "@/game";
+import { createGameInputs } from "./game-inputs";
 
 export async function joinRoom(
   deps: RoomDeps,
@@ -86,6 +88,24 @@ export async function joinRoom(
     scope.child()
   );
   scope.on(roster.events.refused, (reason) => end(reason === "banned" ? "kicked" : "full"));
+
+  const game = createGame(
+    {
+      bus,
+      clock,
+      entropy: deps.entropy,
+      log: deps.log.child("game"),
+      storages: deps.storages,
+      roomId: params.roomId,
+      localPlayerId: playerId,
+      role: transport.role,
+      games: deps.games,
+      inputs: createGameInputs(roster, scope),
+      config: config.game,
+    },
+    scope.child()
+  );
+
   bus.start();
 
   const room: Room = {
@@ -96,6 +116,7 @@ export async function joinRoom(
     sync: bus.sync,
     ended,
     roster,
+    game,
     leave,
     debug: () =>
       describeRoom({

@@ -14,7 +14,13 @@ describe("public surface", () => {
     expect(Object.keys(api).sort()).toEqual(["DEFAULT_ROOM_CONFIG", "joinRoom"]);
   });
   it("the default config has one section per layer", () => {
-    expect(Object.keys(DEFAULT_ROOM_CONFIG).sort()).toEqual(["bus", "link", "roster", "signaling"]);
+    expect(Object.keys(DEFAULT_ROOM_CONFIG).sort()).toEqual([
+      "bus",
+      "game",
+      "link",
+      "roster",
+      "signaling",
+    ]);
   });
 });
 
