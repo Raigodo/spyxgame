@@ -1,0 +1,68 @@
+import type { PeerId } from "@/kernel";
+import { shortId, type Logger } from "@/kernel";
+import type { IceCandidate } from "./ports/rtc-peer-connection-port";
+import type { RtcSignal } from "./rtc-signal";
+import type { RtcPeerLinkFactory } from "./rtc-peer-link-factory";
+import type { RtcPeerRegistry } from "./rtc-peer-registry";
+
+export interface RtcSignalRouterDeps {
+  registry: RtcPeerRegistry;
+  linkFactory: RtcPeerLinkFactory;
+  logger: Logger;
+}
+
+// Routes one incoming signal (offer, answer, ICE candidate) to the link negotiator it belongs to.
+export class RtcSignalRouter {
+  constructor(private readonly deps: RtcSignalRouterDeps) {}
+
+  async handle(from: PeerId, signal: RtcSignal): Promise<void> {
+    this.deps.logger.debug(`Signal from peer=${shortId(from)} type=${signal.type}`);
+
+    switch (signal.type) {
+      case "offer":
+        await this.handleOffer(from, signal.sdp);
+        break;
+      case "answer":
+        await this.handleAnswer(from, signal.sdp);
+        break;
+      case "ice-batch":
+        await this.handleIceBatch(from, signal.candidates);
+        break;
+      default: {
+        const unknownSignal: never = signal;
+        this.deps.logger.warn(`Unknown signal type from peer=${shortId(from)}`, unknownSignal);
+      }
+    }
+  }
+
+  private async handleOffer(from: PeerId, sdp: string): Promise<void> {
+    const { registry, linkFactory, logger } = this.deps;
+    let entry = registry.get(from);
+
+    if (!entry) {
+      logger.debug(`Creating entry for peer=${shortId(from)} on offer arrival`);
+      entry = linkFactory.create(from);
+      registry.add(from, entry);
+    }
+
+    await entry.negotiator.applyOffer({ type: "offer", sdp });
+  }
+
+  private async handleAnswer(from: PeerId, sdp: string): Promise<void> {
+    const entry = this.deps.registry.get(from);
+    if (!entry) {
+      this.deps.logger.warn(`Answer from unknown peer=${shortId(from)}, ignoring`);
+      return;
+    }
+    await entry.negotiator.applyAnswer({ type: "answer", sdp });
+  }
+
+  private async handleIceBatch(from: PeerId, candidates: IceCandidate[]): Promise<void> {
+    const entry = this.deps.registry.get(from);
+    if (!entry) {
+      this.deps.logger.warn(`ICE candidates from unknown peer=${shortId(from)}, ignoring`);
+      return;
+    }
+    for (const candidate of candidates) await entry.negotiator.applyIceCandidate(candidate);
+  }
+}
