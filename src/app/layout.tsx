@@ -1,7 +1,12 @@
-import { Geist, Geist_Mono } from "next/font/google";
+import { Geist, Geist_Mono, Roboto_Slab, Public_Sans } from "next/font/google";
 import "./globals.css";
 import { siteMetadata } from "./site-metadata";
 import { PropsWithChildren } from "react";
+import { cn } from "cn";
+
+const publicSansHeading = Public_Sans({ subsets: ["latin"], variable: "--font-heading" });
+
+const robotoSlab = Roboto_Slab({ subsets: ["latin"], variable: "--font-serif" });
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -17,7 +22,18 @@ export const metadata = siteMetadata;
 
 export default function RootLayout({ children }: PropsWithChildren) {
   return (
-    <html lang="en" className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}>
+    <html
+      lang="en"
+      className={cn(
+        "h-full",
+        "antialiased",
+        geistSans.variable,
+        geistMono.variable,
+        "font-serif",
+        robotoSlab.variable,
+        publicSansHeading.variable
+      )}
+    >
       <body className="flex flex-col min-h-full">{children}</body>
     </html>
   );
