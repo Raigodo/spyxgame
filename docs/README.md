@@ -1,41 +1,60 @@
-# Docs
+# Documentation
 
-Start here. This folder should give a newcomer (human or agent) the full picture of the project. If it does not, fix the docs.
+Start here. These docs describe the app backend: how it is built, why, and how to use it.
 
-## Reading order
-
-1. [overview.md](./overview.md): goal, priorities, topology, layers, where code lives.
-2. Then by task:
+## Reading paths
 
 | You want to | Read |
 | --- | --- |
-| Change anything under `src/shared` | [invariants.md](./invariants.md), then the matching concept doc |
-| Understand host loss, election, refresh, links | [concepts/failover.md](./concepts/failover.md) |
-| Touch the bus, channels, commands, recovery | [concepts/messaging.md](./concepts/messaging.md) |
-| Touch roster, ghosts, duplicates, kick/ban | [concepts/presence.md](./concepts/presence.md) |
-| Add or change a game, or the game framework | [concepts/games.md](./concepts/games.md), [conventions.md](./conventions.md) |
-| Write or debug tests | [concepts/testing.md](./concepts/testing.md) |
-| Change a timer | [timers.md](./timers.md) (a test enforces it) |
-| Ask "why is it built this way?" | [decisions.md](./decisions.md) |
-| See what is broken, missing, or next | [known-issues.md](./known-issues.md) |
-| Decode a term (peer, player, slot, ghost) | [glossary.md](./glossary.md) |
+| Run the project | [Installation](./getting-started/installation.md) |
+| Find your way around the code | [Project structure](./getting-started/project-structure.md) |
+| Understand the whole system in one page | [Architecture overview](./architecture/overview.md) |
+| Build a game | [Creating a game](./guides/creating-a-game.md), then [Game framework](./architecture/game-framework.md) |
+| Build UI on top of the backend | [Using the Room API](./guides/using-the-room-api.md) |
+| Change networking, host loss or election | [Transport](./architecture/transport.md), [Invariants](./reference/invariants.md) |
+| Change replicated state or commands | [Bus](./architecture/bus.md) |
+| Change players, ghosts, kick or ban | [Roster](./architecture/roster.md) |
+| Change a timer or a limit | [Configuration](./guides/configuration.md) |
+| Write or debug a test | [Testing](./guides/testing.md) |
+| Ask "why is it built this way?" | [Decisions](./reference/decisions.md) |
+| See what is broken or missing | [Known issues](./reference/known-issues.md) |
+| Decode a term | [Glossary](./reference/glossary.md) |
 
-## Files
+## Contents
 
-- `overview.md`: the whole system in one page.
-- `concepts/`: how each subsystem works. Only what the code does not show by itself.
-- `invariants.md`: rules that must never break, and why.
-- `conventions.md`: how to write code here, and how to add a game, port, timer or message.
-- `decisions.md`: deliberate choices, each with the rejected alternative.
-- `known-issues.md`: gaps, plus status and next steps.
-- `timers.md`: every timer, what it protects, what a wrong value costs.
-- `glossary.md`, `games/<id>.md` (one spec per game).
+### Getting started
+- [Installation](./getting-started/installation.md): requirements, Firebase, environment, TURN, scripts, deployment.
+- [Project structure](./getting-started/project-structure.md): folders, layers, how a feature folder looks.
+
+### Architecture
+- [Overview](./architecture/overview.md): goal, topology, three flows end to end.
+- [Kernel](./architecture/kernel.md): stores, scopes, results, schemas, config, ports.
+- [Transport](./architecture/transport.md): signaling, links, relay, election, reclaim.
+- [Bus](./architecture/bus.md): channels, commands, recovery, private pieces, host time.
+- [Roster](./architecture/roster.md): players, ghosts, duplicate tabs, kick and ban.
+- [Game framework](./architecture/game-framework.md): slot, play gate, host loop, client API.
+- [Room](./architecture/room.md): `joinRoom`, the `Room` object, teardown.
+
+### Guides
+- [Creating a game](./guides/creating-a-game.md)
+- [Using the Room API](./guides/using-the-room-api.md)
+- [Configuration](./guides/configuration.md)
+- [Testing](./guides/testing.md)
+- [Debugging](./guides/debugging.md)
+
+### Reference
+- [Invariants](./reference/invariants.md): rules that must never break.
+- [Conventions](./reference/conventions.md): how to write code here.
+- [Glossary](./reference/glossary.md)
+- [Decisions](./reference/decisions.md): choices and rejected alternatives.
+- [Known issues](./reference/known-issues.md)
 
 ## Rules for these docs
 
 - The code wins on detail. These docs win on intent. If they disagree on intent, ask.
-- Document only: behavior spread over several files, deliberate choices with a rejected alternative, rules whose violation fails silently, and known gaps. Do not document what a good name already says (class lists, method lists, wire kinds).
-- If a decision is reversed, edit its entry in place. Do not append.
-- A file stays under about 150 lines. Split by subsystem if it grows.
-- Every doc starts with one sentence saying when to read it.
-- Tests read `timers.md` and some tables by row prefix (`` | `name` ``). Keep those table formats.
+- Every page starts with one sentence saying when to read it.
+- Document what is spread over several files, deliberate choices, rules whose violation fails silently, and known gaps. Do not repeat what a good name already says.
+- When behavior changes, update the page that describes it in the same change.
+- If a decision is reversed, edit its entry in [Decisions](./reference/decisions.md). Do not append.
+- Keep a page under about 150 lines. Split by subsystem if it grows.
+- Numbers in the docs mirror `config.ts` files. If you change a default, change it in [Configuration](./guides/configuration.md) too.

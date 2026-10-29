@@ -1,30 +1,74 @@
 # Spyxgame
 
-Browser board-game framework. Players talk peer to peer over WebRTC, and Firestore is used only for signaling. A game is one typed definition plus a page.
+A browser board-game framework. Players talk **peer to peer over WebRTC**; Firestore is used **only for signaling**. A game is one typed definition plus a page: networking, rooms, presence, host failover and state replication are never touched per game.
 
-**Documentation:** start at [docs/README.md](./docs/README.md). Working agreements for contributors and agents: [AGENTS.md](./AGENTS.md).
+> **Status:** the backend (transport, bus, roster, game framework, room) is built and has two games (`demo-tap`, `spy`). The lobby (ready/teams), chat and a real UI are not built yet. The pages in `src/ui` are minimal placeholders.
 
-## Setup
+## What you get
 
-1. Copy `.env.example` to `.env` and fill in the Firebase values. Optionally set `TURN_KEY_ID` and `TURN_KEY_API_TOKEN` (server-side only) for relay servers.
-2. Enable Firestore. Optionally add TTL policies on `expiresAt` for the `rooms`, `signaling-peers`, `messages`, `election-candidates` and `host` collection groups.
-3. Install and run:
+- **Rooms without a server.** One browser is the host, the others are guests. If the host dies, a new host is elected and the game continues from replicated state.
+- **Replicated, versioned state.** Every shared value is a bus channel with `(epoch, rev)` versions and exactly-once commands.
+- **A small game API.** `defineGame` with schemas and pure reducers. Late joiners, pause, away players, timers, notices and private pieces are framework features.
+- **Typed, reactive client.** Everything the UI reads is a `Store<T>`; every action returns a `Result` and never throws for expected failures.
+- **Testable by construction.** Everything touching the outside world is an injected port, so whole multi-peer scenarios run in memory.
+
+## Quick start
 
 ```bash
+cp .env.example .env     # fill in the Firebase values
 pnpm install
 pnpm dev
 ```
 
-Open http://localhost:3000/room to create or join a room.
+Open <http://localhost:3000/room>, create a room, then open the same room in a second tab.
+
+Full setup (Firebase, TTL policies, TURN, deployment): [Installation](./docs/getting-started/installation.md).
+
+## A taste of the API
+
+```ts
+import { getRoomDeps } from "@/compose";
+import { joinRoom } from "@/room";
+import { as, type RoomId } from "@/kernel";
+
+const result = await joinRoom(getRoomDeps(), { roomId: as<RoomId>("abc123") });
+if (!result.ok) throw new Error(result.reason); // "unavailable"
+
+const { room } = result.value;
+room.roster.state.players.subscribe((players) => console.log(players));
+
+const started = await room.game.actions.start(demoTap, { goal: 20 }); // host only
+if (!started.ok) console.log(started.reason); // e.g. "not-host"
+```
+
+Using it from React: [Using the Room API](./docs/guides/using-the-room-api.md).
+
+## Documentation
+
+Start at the [documentation index](./docs/README.md).
+
+| Section | What is in it |
+| --- | --- |
+| [Getting started](./docs/getting-started/installation.md) | Install, configure, run, deploy, project layout |
+| [Architecture](./docs/architecture/overview.md) | How the system works, layer by layer |
+| [Guides](./docs/guides/creating-a-game.md) | Creating a game, using the Room API, configuration, testing, debugging |
+| [Reference](./docs/reference/invariants.md) | Invariants, conventions, glossary, decisions, known issues |
+
+Working agreements for contributors and agents: [AGENTS.md](./AGENTS.md).
 
 ## Scripts
 
-- `pnpm check`: lint, type-check and tests (also runs on pre-commit)
-- `pnpm test` / `pnpm test:watch`: Vitest
-- `pnpm build` / `pnpm start`: production build and server
-- `pnpm format`: Prettier
+| Command | Does |
+| --- | --- |
+| `pnpm dev` / `pnpm build` / `pnpm start` | Next.js development, production build, production server |
+| `pnpm check` | ESLint, `tsc --noEmit` and the tests. Also runs on pre-commit |
+| `pnpm test` / `pnpm test:watch` | Vitest |
+| `pnpm format` / `pnpm format:check` | Prettier |
 
-## Debugging
+## Stack
 
-- Set `NEXT_PUBLIC_LOG_LEVEL` and `NEXT_PUBLIC_LOG_SCOPES` (for example `bus:debug,webrtc:warn`), then restart the dev server.
-- In a development build, `window.__room()` in the browser console returns a snapshot of the bus, presence, election and links.
+Next.js (app router), React 19, TypeScript (strict), Firebase Firestore, WebRTC, Tailwind 4, Vitest, pnpm. Deployed on Vercel.
+
+## License
+
+MIT, see [LICENSE](./LICENSE).
