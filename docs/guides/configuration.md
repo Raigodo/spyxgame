@@ -18,9 +18,10 @@ Read before changing a number. All durations are **milliseconds**. Defaults live
 
 | Key                                                             | Default              | Meaning                                       |
 | --------------------------------------------------------------- | -------------------- | --------------------------------------------- |
+| `iceServers`                                                    | 2 Google STUN        | STUN-only fallback list                       |
 | `iceFetchTimeoutMs`                                             | 4000                 | ICE server fetch, then STUN fallback          |
 | `offerTimeoutMs`                                                | 12000 (d)            | Wait for the host's offer                     |
-| `reconnectTimeoutMs`                                            | 5000                 | Guest reconnect attempt                       |
+| `reconnectTimeoutMs`                                            | 5000                 | Wait for a replacement offer, then drop entry |
 | `reclaimWindowMs`                                               | 10000                | Reclaim retry window                          |
 | `byeFlushMs`                                                    | 500                  | Wait after `bye` before closing               |
 | `hostClaimMaxAgeMs`                                             | 15000                | Trusted age of the pagehide stamp             |

@@ -10,13 +10,13 @@ Read when something does not connect, does not fail over, or does not sync.
 NEXT_PUBLIC_LOG_SCOPES=bus:debug,link:warn,election:debug
 ```
 
-Restart the dev server after changing it. Scopes follow the code: `link`, `signaling`, `election`, `relay`, `bus`, `roster`, `game`, `room`.
+Restart the dev server after changing it. A scope matches by any segment of its name. Scopes in the code include `bus`, `game`, `election`, `link`, `relay`, `mailbox`, `probe`, `reclaim`, `reconnect`, `negotiator`, `registry`, `ice`, `chunks`, `acks`, `active`, `firestore`, `host`, `guest`, `moderation` and `events`.
 
 Invalid network input is reported as a throttled warning with `{ from, kind }`; if you see it, a peer is sending something the schema rejects.
 
 ## Snapshot
 
-`room.debug()` returns a snapshot of the current room (role, host, members, links, sync, channel versions). Log it from the console in a component that holds the room.
+`room.debug()` returns a snapshot of the current room: `roomId`, `playerId`, `self`, `role`, `host`, `sync`, `ended`, `members`, `links`, `players` and `bans`. Channel versions are not included. Log it from the console in a component that holds the room.
 
 ## Symptoms
 

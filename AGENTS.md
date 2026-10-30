@@ -10,19 +10,18 @@ A browser board-game framework: players connect peer to peer over WebRTC, Firest
 
 Code wins on detail, docs win on intent. If they disagree, say so and fix the doc in the same change.
 
-| Touching                                     | Read first                                                      |
-| -------------------------------------------- | --------------------------------------------------------------- |
-| Anything                                     | `docs/architecture/overview.md`, `docs/reference/invariants.md` |
-| Stores, Scope, schema, config, ports         | `docs/architecture/kernel.md`                                   |
-| Signaling, links, election, relay            | `docs/architecture/transport.md`                                |
-| Replicated state, failover recovery          | `docs/architecture/bus.md`                                      |
-| Players, names, duplicate tabs, bans         | `docs/architecture/roster.md`                                   |
-| Games, slot, host loop                       | `docs/architecture/game-framework.md`                           |
-| `joinRoom`, `Room`                           | `docs/architecture/room.md`                                     |
-| Screens, header, toasts, dialogs, game pages | `docs/architecture/ui.md`                                       |
-| Adding a game                                | `docs/guides/creating-a-game.md`                                |
-| Numbers and timers                           | `docs/guides/configuration.md` and each layer's `config.ts`     |
-| Style and structure                          | `docs/reference/conventions.md`                                 |
+| Touching                             | Read first                                                      |
+| ------------------------------------ | --------------------------------------------------------------- |
+| Anything                             | `docs/architecture/overview.md`, `docs/reference/invariants.md` |
+| Stores, Scope, schema, config, ports | `docs/architecture/kernel.md`                                   |
+| Signaling, links, election, relay    | `docs/architecture/transport.md`                                |
+| Replicated state, failover recovery  | `docs/architecture/bus.md`                                      |
+| Players, names, duplicate tabs, bans | `docs/architecture/roster.md`                                   |
+| Games, slot, host loop               | `docs/architecture/game-framework.md`                           |
+| `joinRoom`, `Room`                   | `docs/architecture/room.md`                                     |
+| Adding a game                        | `docs/guides/creating-a-game.md`                                |
+| Numbers and timers                   | `docs/guides/configuration.md` and each layer's `config.ts`     |
+| Style and structure                  | `docs/reference/conventions.md`                                 |
 
 Docs rules: each page starts with one sentence saying when to read it, stays under about 150 lines, and is updated when behavior changes.
 

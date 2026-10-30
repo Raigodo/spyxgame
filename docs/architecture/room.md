@@ -5,51 +5,54 @@ Read to learn what the UI sees and how a join and a leave are wired. `joinRoom` 
 ## API
 
 ```ts
-joinRoom(deps: RoomDeps, { roomId, playerId?, nickname? }):
-  Promise<Result<{ room: Room; generated: boolean }, "unavailable">>
+joinRoom(deps: RoomDeps, params: JoinRoomParams): Promise<Result<JoinedRoom, JoinError>>
+
+interface JoinRoomParams { roomId: RoomId; playerId?: PlayerId; nickname?: string }
+interface JoinedRoom { room: Room; generated: boolean }
+type JoinError = "unavailable";
 ```
 
 - `playerId` absent: a new one is minted and `generated` is `true`. The caller stores it (per tab) to rejoin after a refresh.
-- `unavailable`: Firestore or signaling could not be reached. Nothing is left running.
+- `unavailable`: signaling could not be reached. The scope is disposed, nothing is left running.
 
 ```ts
 interface Room {
-  roomId: RoomId;
-  playerId: PlayerId;
-  self: PeerId;
-  role: Store<"guest" | "host">;
-  sync: Store<"lost" | "syncing" | "ready">;
-  ended: Store<EndReason | undefined>; // "superseded" | "kicked" | "full"
-  roster: Roster; // see Roster
-  game: GameApi; // state, actions (start, end), per-game handles
+  readonly roomId: RoomId;
+  readonly playerId: PlayerId;
+  readonly self: PeerId;
+  readonly role: Store<"guest" | "host">;
+  readonly sync: Store<BusSync>; // "lost" | "syncing" | "ready"
+  readonly ended: Store<RoomEnd | undefined>; // RoomEnd = { reason: "superseded" | "kicked" | "full" }
+  readonly roster: Roster; // see Roster
+  readonly game: GameApi;
   leave(): Promise<void>; // idempotent
-  debug(): DebugSnapshot; // see Debugging
+  debug(): Record<string, unknown>; // snapshot, see Debugging
 }
 ```
 
-`ended` is set once and never cleared: the room is over for this tab and the UI shows a final screen. `sync` drives "reconnecting" banners and disabled buttons.
+`ended` is set once and never cleared; the room has already left when it is set, and the UI shows a final screen. `sync` drives "reconnecting" banners and disabled buttons. Reasons: `superseded` (another tab took this player), `kicked` (kicked or banned), `full`.
 
 ## Wiring
 
-`room/join.ts` builds everything on **one root `Scope`**:
+`room/join.ts` builds everything on **one root `Scope`**, in this order:
 
-1. `joinTransport` (registers its leave on the scope).
-2. `createBus`.
-3. Roster and game on **child scopes**, each registering its channels.
-4. `createGameInputs` feeds the game from the roster (who plays, names, removals), so the two never import each other.
-5. `bus.start()`.
-6. Subscriptions turn `transport.dropped`, `roster refused` and `superseded` into `ended`.
+1. `joinTransport(..., scope)` (it registers its own leave on the scope first, so it disposes last). A failure disposes the scope and returns `fail`.
+2. `scope.on(transport.dropped, ...)` ends the room with the drop reason (`kicked` or `superseded`).
+3. `createBus(..., scope)`.
+4. `createRoster(..., scope.child())`, registering its channels. `roster.events.refused` ends the room (`banned` becomes `kicked`, `full` stays `full`).
+5. `createGame(..., scope.child())`, with `createGameInputs(roster, scope)` feeding it from the roster (who is here, names, removals), so roster and game never import each other.
+6. `bus.start()`, after all channels are registered.
 
-Because scopes dispose last-registered-first, `leave()` tears down client wiring, then the bus, then presence and the session. `leave()` is idempotent; a second call returns the same promise.
+`end(reason)` sets `ended` once, then calls `leave()`. `leave()` runs `scope.dispose()` then `transport.leave()` and is idempotent: a second call returns the same promise. Scope cleanups run in reverse registration order, so game and roster wiring go first, then the bus, then the transport (presence and session).
 
 ## RoomDeps
 
-Built once by `getRoomDeps()` in `src/compose.ts`: clock, ids, logger, storages, Firestore ports, RTC provider, ICE source, entropy, the game list (`GAME_DEFS`) and config overrides. Tests build their own through `RoomHarness`.
+Fields: `clock`, `ids`, `log`, `storages` (`tab`, `profile`, `device`), `entropy`, `games` (`readonly RegisteredGame[]`), `pageLifecycle`, `membership`, `inbox`, `election`, `connections`, `iceServers`, `config` (`RoomConfig`: `signaling`, `link`, `bus`, `roster`, `game`; each layer gets only its own section). Built once by `getRoomDeps()` (via `createRoomDeps()`) in `src/compose.ts` from the real adapters, with `GAME_DEFS` and `DEFAULT_ROOM_CONFIG`. Tests build their own through `RoomHarness` (`room/fakes.ts`).
 
 ## What the UI must do
 
 - Call `joinRoom` once per page, keep the `Room`, and call `leave()` on unmount.
-- Keep `playerId` in tab storage under `player-id:<roomId>`.
+- Keep `playerId` in tab storage under `player-id:<roomId>` (`RoomProvider` does it).
 - Read only stores and callbacks; call intents; never reach into the bus or transport.
 
 See [Using the room API](../guides/using-the-room-api.md).

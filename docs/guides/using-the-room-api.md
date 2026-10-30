@@ -5,10 +5,11 @@ Read when you build UI or any code on top of `Room`. All state is stores, all mo
 ## Join and leave
 
 ```ts
-const joined = await joinRoom(getRoomDeps(), { roomId, playerId, nickname });
+const deps = getRoomDeps();
+const joined = await joinRoom(deps, { roomId, playerId, nickname }); // playerId and nickname optional
 if (!joined.ok) return showUnavailable();
 const { room, generated } = joined.value;
-if (generated) sessionStorage.setItem(`player-id:${roomId}`, room.playerId);
+if (generated) deps.storages.tab.set(`player-id:${roomId}`, room.playerId); // a refresh keeps the player
 // ...
 await room.leave(); // idempotent
 ```
@@ -25,7 +26,8 @@ In React, use `useStore(store)` (it wraps `useSyncExternalStore`). A store retur
 Moments, not state:
 
 ```ts
-const off = room.roster.events.on((e) => { if (e.type === "joined") ... });
+const off = room.roster.events.joined.on((player) => { ... });
+// also: rejoined, left ({ player, reason: "expired" | "removed" }), refused
 ```
 
 ## Acting
@@ -41,9 +43,9 @@ Intents never throw for expected failures. Handle `r.reason`.
 
 ```ts
 await room.game.actions.start(demoTap, { goal: 20 });
-const handle = room.game.handle(demoTap);
-handle.view.get(); // slot, me, players, away, notices, supported
-await handle.send("tap", {});
+const handle = room.game.actions.handle(demoTap);
+handle.view.get(); // undefined, or { round, settings, state, setup, me, players, away, paused, notices, timers }
+await handle.send({ type: "tap" });
 ```
 
 ## Connection states
