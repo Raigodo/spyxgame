@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { RoomNavigator } from "@/ui/room-navigator";
 import { RoomProvider } from "@/ui/room-provider";
+import { AppShell } from "@/ui/shell/app-shell";
 
 export default async function RoomLayout({
   children,
@@ -13,7 +14,7 @@ export default async function RoomLayout({
   return (
     <RoomProvider key={roomId} roomId={roomId}>
       <RoomNavigator />
-      {children}
+      <AppShell>{children}</AppShell>
     </RoomProvider>
   );
 }

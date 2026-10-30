@@ -13,7 +13,7 @@ src/
   game/        Game framework: defineGame, slot, host loop, GameHandle
   room/        joinRoom: builds everything on one Scope and returns a Room
   games/       The games (demo-tap, spy) and the two game registries
-  ui/          React: provider, hooks, screens. Placeholders for now
+  ui/          React: shell, header, lobby, dialogs, shared game-page pieces
   adapters/    Real-world implementations of kernel ports (clock, storage, logger, ...)
   compose.ts   The only file that picks real adapters
   app/         Next.js routes only

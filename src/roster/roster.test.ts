@@ -19,6 +19,7 @@ describe("public surface", () => {
     expect(Object.keys(api).sort()).toEqual([
       "DEFAULT_ROSTER_CONFIG",
       "createRoster",
+      "openProfile",
       "rosterConfig",
     ]);
   });

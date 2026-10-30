@@ -1,7 +1,8 @@
 // The remembered nickname. `store` is already prefixed (createRoster wraps Storages.profile with
-// PROFILE_KEY_PREFIX). The store is best-effort: it never throws.
+// PROFILE_KEY_PREFIX in `openProfile`). The store is best-effort: it never throws.
 
-import type { KeyValueStore } from "@/kernel";
+import { prefixed, type KeyValueStore } from "@/kernel";
+import { PROFILE_KEY_PREFIX } from "./names";
 
 const NAME_KEY = "name";
 
@@ -15,6 +16,11 @@ export function createProfileStore(store: KeyValueStore, ttlMs: number): Profile
     loadName: () => store.get(NAME_KEY),
     saveName: (name) => store.set(NAME_KEY, name, { ttlMs }),
   };
+}
+
+/** The remembered nickname in the browser's profile storage. The landing page and the roster share it. */
+export function openProfile(profile: KeyValueStore, ttlMs: number): ProfileStore {
+  return createProfileStore(prefixed(profile, PROFILE_KEY_PREFIX), ttlMs);
 }
 
 /** The nickname a new join uses: explicit, else remembered, else the default. Pure. */

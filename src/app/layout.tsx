@@ -3,6 +3,7 @@ import "./globals.css";
 import { siteMetadata } from "./site-metadata";
 import { PropsWithChildren } from "react";
 import { cn } from "cn";
+import { Toaster } from "@/ui/components/ui/sonner";
 
 const publicSansHeading = Public_Sans({ subsets: ["latin"], variable: "--font-heading" });
 
@@ -34,7 +35,10 @@ export default function RootLayout({ children }: PropsWithChildren) {
         publicSansHeading.variable
       )}
     >
-      <body className="flex flex-col min-h-full">{children}</body>
+      <body className="flex flex-col min-h-full">
+        {children}
+        <Toaster />
+      </body>
     </html>
   );
 }

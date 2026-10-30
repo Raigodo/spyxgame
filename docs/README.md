@@ -10,7 +10,7 @@ Start here. These docs describe the app backend: how it is built, why, and how t
 | Find your way around the code | [Project structure](./getting-started/project-structure.md) |
 | Understand the whole system in one page | [Architecture overview](./architecture/overview.md) |
 | Build a game | [Creating a game](./guides/creating-a-game.md), then [Game framework](./architecture/game-framework.md) |
-| Build UI on top of the backend | [Using the Room API](./guides/using-the-room-api.md) |
+| Build UI on top of the backend | [UI](./architecture/ui.md), [Using the Room API](./guides/using-the-room-api.md) |
 | Change networking, host loss or election | [Transport](./architecture/transport.md), [Invariants](./reference/invariants.md) |
 | Change replicated state or commands | [Bus](./architecture/bus.md) |
 | Change players, ghosts, kick or ban | [Roster](./architecture/roster.md) |
@@ -34,6 +34,7 @@ Start here. These docs describe the app backend: how it is built, why, and how t
 - [Roster](./architecture/roster.md): players, ghosts, duplicate tabs, kick and ban.
 - [Game framework](./architecture/game-framework.md): slot, play gate, host loop, client API.
 - [Room](./architecture/room.md): `joinRoom`, the `Room` object, teardown.
+- [UI](./architecture/ui.md): shell, header slot, toasts, dialogs, game pages.
 
 ### Guides
 - [Creating a game](./guides/creating-a-game.md)

@@ -2,17 +2,18 @@
 
 import { findModule } from "@/games/modules";
 import { GameShell } from "./game-shell";
-import { RoomHeader } from "./room-header";
-import { Screen } from "./screen";
+import { HeaderSlot } from "./shell/header-slot";
 
 export function GameScreen({ gameId }: { gameId: string }) {
   const mod = findModule(gameId);
   if (!mod) {
     return (
-      <Screen>
-        <RoomHeader title="Unknown game" />
+      <>
+        <HeaderSlot>
+          <span className="mr-auto truncate text-sm font-medium">Unknown game</span>
+        </HeaderSlot>
         <p>No game called “{gameId}”.</p>
-      </Screen>
+      </>
     );
   }
   return (

@@ -1,8 +1,10 @@
 import type { GameHandle, GameView } from "@/game";
+import { Button } from "@/ui/components/ui/button";
+import { Panel } from "@/ui/game/panel";
 import { useStore } from "@/ui/use-store";
-import { btn, card, heading, input } from "@/ui/styles";
 import { nextMark, spyNotes } from "./notes";
 import type { SpyTypes } from "./schemas";
+import { Textarea } from "@/ui/components/ui/textarea";
 
 /** Device-only notes (handle.local): never sent, kept per round. */
 export function NotesPanel({
@@ -16,13 +18,13 @@ export function NotesPanel({
   const value = useStore(notes.value);
   const others = view.players.filter((p) => p.role === "player" && p.id !== view.me.playerId);
   return (
-    <section className={card}>
-      <h2 className={heading}>My notes (only on this device)</h2>
+    <Panel title="My notes (only on this device)">
       <div className="flex flex-wrap gap-2">
         {others.map((p) => (
-          <button
+          <Button
             key={p.id}
-            className={btn}
+            variant="outline"
+            size="sm"
             onClick={() =>
               notes.set({
                 ...value,
@@ -31,14 +33,15 @@ export function NotesPanel({
             }
           >
             {p.name}: {value.marks[p.id] ?? "unknown"}
-          </button>
+          </Button>
         ))}
       </div>
-      <textarea
-        className={`${input} h-24 w-full`}
+      <Textarea
+        aria-label="Notes"
+        className="h-24"
         value={value.pad}
         onChange={(e) => notes.set({ ...value, pad: e.target.value })}
       />
-    </section>
+    </Panel>
   );
 }

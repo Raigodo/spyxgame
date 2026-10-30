@@ -2,14 +2,13 @@
 // Call before `bus.start()` (channels must be registered first). Teardown is the scope's: the
 // flows registered last are stopped first.
 
-import { fail, ok, prefixed, type Result, type Scope } from "@/kernel";
+import { fail, ok, type Result, type Scope } from "@/kernel";
 import type { BusFailure } from "@/bus";
 import { GuestFlow } from "./guest-flow";
 import { HostFlow } from "./host-flow";
 import { Moderation } from "./moderation";
-import { PROFILE_KEY_PREFIX } from "./names";
 import type { Roster, RosterDeps } from "./model";
-import { createProfileStore, pickName } from "./profile-store";
+import { openProfile, pickName } from "./profile-store";
 import { registerRosterChannels } from "./state";
 import { createChangeEvents, createRosterView } from "./view";
 
@@ -27,10 +26,7 @@ export function createRoster(deps: RosterDeps, scope: Scope): Roster {
 
   const { state, events } = registerRosterChannels({ bus, localPlayerId, config });
 
-  const profile = createProfileStore(
-    prefixed(deps.storages.profile, PROFILE_KEY_PREFIX),
-    config.profileTtlMs
-  );
+  const profile = openProfile(deps.storages.profile, config.profileTtlMs);
   let nickname = pickName(
     deps.nickname,
     profile.loadName(),

@@ -7,6 +7,7 @@ import { SessionStorageAdapter } from "@/adapters/session-storage-adapter";
 import { SystemClock } from "@/adapters/system-clock";
 import { TurnIceServerSource } from "@/adapters/turn-ice-server-source";
 import { UlidIdGenerator } from "@/adapters/ulid-id-generator";
+import type { KeyValueStore } from "@/kernel";
 import { GAME_DEFS } from "@/games/definitions";
 import { DEFAULT_ROOM_CONFIG, type RoomDeps } from "@/room";
 import { BrowserRtcConnectionProvider } from "@/transport/link/adapters/browser/browser-rtc-connection-provider";
@@ -14,6 +15,11 @@ import { getFirestoreClient } from "@/transport/signaling/adapters/firestore/fir
 import { FirestoreHostElectionAdapter } from "@/transport/signaling/adapters/firestore/firestore-host-election-adapter";
 import { FirestoreRoomMembershipAdapter } from "@/transport/signaling/adapters/firestore/firestore-room-membership-adapter";
 import { FirestoreSignalInboxAdapter } from "@/transport/signaling/adapters/firestore/firestore-signal-inbox-adapter";
+
+let profileStorage: KeyValueStore | undefined;
+/** The remembered-nickname storage alone, so the landing page needs no Firebase environment. */
+export const getProfileStorage = (): KeyValueStore =>
+  (profileStorage ??= new CookieStorageAdapter());
 
 export function createRoomDeps(): RoomDeps {
   const clock = new SystemClock();
@@ -28,7 +34,7 @@ export function createRoomDeps(): RoomDeps {
     log,
     storages: {
       tab: new SessionStorageAdapter(),
-      profile: new CookieStorageAdapter(),
+      profile: getProfileStorage(),
       device: new LocalStorageAdapter(clock),
     },
     pageLifecycle: new BrowserPageLifecycle(),
